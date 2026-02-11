@@ -1,8 +1,10 @@
 import requests
+import os
+from dotenv import load_dotenv
 
-SUPABASE_URL = "https://.supabase.co/"
-SUPABASE_KEY = ".."
-
+load_dotenv()
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY")
 
 def get_token(email, password):
     url = f"{SUPABASE_URL}/auth/v1/token?grant_type=password"

@@ -15,3 +15,5 @@ env/
 
 # Databases (if you have local sqlite)
 *.sqlite3
+
+question.mp3

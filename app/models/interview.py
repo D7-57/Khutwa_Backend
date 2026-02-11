@@ -2,6 +2,7 @@ import uuid
 from sqlalchemy import DateTime, ForeignKey, Integer, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.dialects.postgresql import JSONB
 from app.db.base import Base
 
 class InterviewSession(Base):
@@ -35,5 +36,6 @@ class SessionQuestion(Base):
     user_answer: Mapped[str | None] = mapped_column(Text, nullable=True)
     ai_feedback: Mapped[str | None] = mapped_column(Text, nullable=True)
     score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    evaluation_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     session: Mapped["InterviewSession"] = relationship(back_populates="session_questions")

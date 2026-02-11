@@ -10,4 +10,6 @@ class Settings(BaseSettings):
     SUPABASE_ANON_KEY: str
     SUPABASE_JWT_SECRET: str  # used to verify JWT
 
+    OPENAI_API_KEY: str
+
 settings = Settings()
