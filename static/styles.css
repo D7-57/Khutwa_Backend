@@ -1,0 +1,56 @@
+:root { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+body { margin: 0; background: #0b0f19; color: #e8eefc; }
+.wrap { max-width: 920px; margin: 24px auto; padding: 0 16px 48px; }
+header { margin-bottom: 16px; }
+h1 { margin: 0 0 8px; font-size: 28px; }
+h2 { margin: 0 0 12px; font-size: 18px; }
+.muted { color: #a9b7d6; font-size: 14px; }
+.card {
+  background: #121a2b;
+  border: 1px solid #223050;
+  border-radius: 14px;
+  padding: 16px;
+  margin: 12px 0;
+  box-shadow: 0 12px 22px rgba(0,0,0,.25);
+}
+label { display: block; margin: 10px 0 6px; color: #cbd6f3; font-size: 13px; }
+input, textarea {
+  width: 100%;
+  background: #0f1626;
+  color: #e8eefc;
+  border: 1px solid #223050;
+  border-radius: 10px;
+  padding: 10px 12px;
+  outline: none;
+}
+textarea { resize: vertical; }
+button {
+  background: #2b62ff;
+  color: white;
+  border: 0;
+  border-radius: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+  font-weight: 600;
+}
+button:disabled { opacity: .45; cursor: not-allowed; }
+.row { display: flex; gap: 10px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+.grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+@media (max-width: 740px) { .grid { grid-template-columns: 1fr; } }
+.prompt {
+  background: #0f1626;
+  border: 1px dashed #2b62ff;
+  border-radius: 12px;
+  padding: 12px;
+  min-height: 52px;
+  white-space: pre-wrap;
+}
+.details pre {
+  background: #0f1626;
+  border: 1px solid #223050;
+  border-radius: 12px;
+  padding: 10px;
+  overflow: auto;
+}
+hr { border: 0; border-top: 1px solid #223050; margin: 14px 0; }
+code { color: #93b0ff; }

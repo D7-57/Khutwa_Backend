@@ -1,6 +1,12 @@
 from fastapi import APIRouter, File, UploadFile, Depends, HTTPException
 from app.core.security import get_current_user_id
 from app.services.stt import transcribe_audio
+from fastapi import APIRouter, Depends
+from fastapi.responses import StreamingResponse
+from io import BytesIO
+
+from app.core.security import get_current_user_id
+from app.services.tts import synthesize_question_audio
 
 router = APIRouter(prefix="/audio", tags=["audio"])
 
@@ -15,3 +21,14 @@ async def transcribe(
     audio_bytes = await audio.read()
     text = transcribe_audio(audio_bytes, filename=audio.filename or "audio.webm")
     return {"transcript": text}
+
+@router.get(
+    "/prompt-audio",
+    responses={200: {"content": {"audio/mpeg": {}}}},
+)
+def prompt_audio(
+    text: str,
+    _user_id: str = Depends(get_current_user_id),
+):
+    audio_bytes = synthesize_question_audio(text)
+    return StreamingResponse(BytesIO(audio_bytes), media_type="audio/mpeg")

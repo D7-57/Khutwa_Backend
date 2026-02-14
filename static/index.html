@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Interview Simulator</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Interview Simulator (TTS + STT)</h1>
+      <p class="muted">Token-based test UI. Paste your Supabase access token.</p>
+    </header>
+
+    <section class="card">
+      <h2>Auth</h2>
+      <label>Access Token (Bearer)</label>
+      <textarea id="token" rows="3" placeholder="Paste Supabase access_token here..."></textarea>
+      <div class="row">
+        <button id="saveToken">Save token</button>
+        <span id="authStatus" class="muted"></span>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Start Interview</h2>
+      <div class="grid">
+        <div>
+          <label>Role name</label>
+          <input id="roleName" value="software_engineer" />
+        </div>
+        <div>
+          <label># Questions</label>
+          <input id="numQuestions" type="number" value="3" min="1" max="20" />
+        </div>
+        <div>
+          <label>followup_max</label>
+          <input id="followupMax" type="number" value="1" min="0" max="5" />
+        </div>
+      </div>
+      <div class="row">
+        <button id="startBtn">Start</button>
+        <span class="muted">Session: <code id="sessionId">-</code></span>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Prompt</h2>
+      <div id="promptBox" class="prompt">No prompt yet.</div>
+
+      <div class="row">
+        <button id="playPromptBtn" disabled>▶ Play prompt (TTS)</button>
+        <audio id="audioPlayer" controls></audio>
+      </div>
+
+      <details class="details">
+        <summary>Last response (debug)</summary>
+        <pre id="debug"></pre>
+      </details>
+    </section>
+
+    <section class="card">
+      <h2>Answer</h2>
+
+      <div class="row">
+        <button id="recBtn" disabled>🎤 Start recording</button>
+        <button id="stopBtn" disabled>⏹ Stop</button>
+        <span id="recStatus" class="muted"></span>
+      </div>
+
+      <div class="row">
+        <button id="sendAudioBtn" disabled>Send recorded audio (STT → /turn)</button>
+        <button id="transcribeOnlyBtn" disabled>Transcribe only (/audio/transcribe)</button>
+      </div>
+
+      <hr />
+
+      <label>Or type answer</label>
+      <textarea id="answerText" rows="3" placeholder="Type answer_text..."></textarea>
+      <div class="row">
+        <button id="sendTextBtn" disabled>Send text → /turn</button>
+      </div>
+    </section>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
