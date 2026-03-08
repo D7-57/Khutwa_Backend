@@ -54,7 +54,14 @@ class CVEvaluation(Base):
         nullable=False,
     )
 
-    # if you prefer: role_id FK -> roles.id, but role_name is fine for MVP
+    # NEW: FK to roles table (assuming roles.id is UUID; adjust if it's INT)
+    role_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("roles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    # snapshot name (useful even if roles table changes)
     target_role: Mapped[str] = mapped_column(Text, nullable=False)
 
     overall_score: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 0..100
