@@ -1,6 +1,8 @@
+import uuid
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi import APIRouter, UploadFile, File
-
 from app.core.security import bearer_scheme
+from sqlalchemy.orm import Session
 
 from app.services.cv_service import (
     _supabase_storage_upload,
@@ -9,22 +11,15 @@ from app.services.cv_service import (
 )
 from app.services.supabase_storage import create_signed_url
 
-import uuid
-from fastapi import Depends, HTTPException
-from sqlalchemy.orm import Session
-
-from app.db.session import get_db
 from app.core.security import get_current_user_id
+from app.db.session import get_db
 from app.models.cv import CVDocument, CVEvaluation
-from app.schemas.cv import CVEvaluateRequest, CVEvaluateResponse
-from app.services.cv_evaluation_service import evaluate_cv_with_llm
-
-# import your Role model (adjust path/name to your project)
 from app.models.role import Role
-
-
+from app.schemas.cv import CVEvaluateRequest, CVEvaluateResponse
+from app.services.cv_evaluation import run_full_cv_evaluation
 
 router = APIRouter(prefix="/cv", tags=["cv"])
+
 
 
 @router.post("/upload")
@@ -118,6 +113,7 @@ def get_cv_download_url(
     url = create_signed_url(bucket=bucket, object_path=object_path, expires_in=600, user_jwt=creds.credentials)
     return {"url": url, "expires_in": 600}
 
+
 @router.post("/{cv_id}/evaluate", response_model=CVEvaluateResponse)
 def evaluate_cv(
     cv_id: str,
@@ -125,7 +121,12 @@ def evaluate_cv(
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    doc = db.query(CVDocument).filter(CVDocument.id == uuid.UUID(cv_id)).first()
+    try:
+        cv_uuid = uuid.UUID(cv_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid cv_id")
+
+    doc = db.query(CVDocument).filter(CVDocument.id == cv_uuid).first()
     if not doc:
         raise HTTPException(status_code=404, detail="CV not found")
 
@@ -136,44 +137,46 @@ def evaluate_cv(
     if not role:
         raise HTTPException(status_code=404, detail="Role not found")
 
-    evaluation_json = evaluate_cv_with_llm(
+    evaluation_json = run_full_cv_evaluation(
         raw_text=doc.raw_text or "",
         extracted_data=doc.extracted_data or {},
         role_name=role.name,
-        role_description=getattr(role, "description", None),
+        role_description=role.description,
         language=doc.language,
     )
 
-    # pull top-level scores (defensive)
-    overall = None
-    ats = None
-    try:
-        overall = int(evaluation_json.get("role_fit", {}).get("score"))
-    except Exception:
-        overall = None
-    try:
-        ats = int(evaluation_json.get("ats", {}).get("score"))
-    except Exception:
-        ats = None
+    overall_score = None
+    ats_score = None
 
-    ev = CVEvaluation(
+    try:
+        overall_score = int(evaluation_json.get("role_fit", {}).get("score"))
+    except Exception:
+        pass
+
+    try:
+        ats_score = int(evaluation_json.get("ats", {}).get("score"))
+    except Exception:
+        pass
+
+    evaluation = CVEvaluation(
         cv_id=doc.id,
         role_id=role.id,
         target_role=role.name,
-        overall_score=overall,
-        ats_score=ats,
+        overall_score=overall_score,
+        ats_score=ats_score,
         evaluation_json=evaluation_json,
     )
-    db.add(ev)
+
+    db.add(evaluation)
     db.commit()
-    db.refresh(ev)
+    db.refresh(evaluation)
 
     return CVEvaluateResponse(
-        evaluation_id=ev.id,
-        cv_id=ev.cv_id,
-        role_id=ev.role_id,
-        target_role=ev.target_role,
-        overall_score=ev.overall_score,
-        ats_score=ev.ats_score,
-        evaluation_json=ev.evaluation_json or {},
+        evaluation_id=evaluation.id,
+        cv_id=evaluation.cv_id,
+        role_id=evaluation.role_id,
+        target_role=evaluation.target_role,
+        overall_score=evaluation.overall_score,
+        ats_score=evaluation.ats_score,
+        evaluation_json=evaluation.evaluation_json or {},
     )
