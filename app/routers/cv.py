@@ -1,8 +1,14 @@
 import uuid
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import  Depends, HTTPException
 from fastapi import APIRouter, UploadFile, File
 from app.core.security import bearer_scheme
 from sqlalchemy.orm import Session
+from app.schemas.cv import (
+    CVEvaluationItemResponse,
+    CVEvaluationDetailResponse,
+    CVDocumentListItemResponse,
+    CVLatestEvaluationSummary,
+)
 
 from app.services.cv_service import (
     _supabase_storage_upload,
@@ -180,3 +186,125 @@ def evaluate_cv(
         ats_score=evaluation.ats_score,
         evaluation_json=evaluation.evaluation_json or {},
     )
+
+@router.get("/{cv_id}/evaluations", response_model=list[CVEvaluationItemResponse])
+def list_cv_evaluations(
+    cv_id: str,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
+    try:
+        cv_uuid = uuid.UUID(cv_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid cv_id")
+
+    doc = db.query(CVDocument).filter(CVDocument.id == cv_uuid).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="CV not found")
+
+    if str(doc.user_id) != user_id:
+        raise HTTPException(status_code=403, detail="Not your CV")
+
+    evaluations = (
+        db.query(CVEvaluation)
+        .filter(CVEvaluation.cv_id == doc.id)
+        .order_by(CVEvaluation.created_at.desc())
+        .all()
+    )
+
+    return [
+        CVEvaluationItemResponse(
+            evaluation_id=e.id,
+            cv_id=e.cv_id,
+            role_id=e.role_id,
+            target_role=e.target_role,
+            overall_score=e.overall_score,
+            ats_score=e.ats_score,
+            created_at=e.created_at,
+        )
+        for e in evaluations
+    ]
+
+
+@router.get("/evaluations/{evaluation_id}", response_model=CVEvaluationDetailResponse)
+def get_cv_evaluation(
+    evaluation_id: str,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
+    try:
+        evaluation_uuid = uuid.UUID(evaluation_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid evaluation_id")
+
+    evaluation = (
+        db.query(CVEvaluation)
+        .filter(CVEvaluation.id == evaluation_uuid)
+        .first()
+    )
+    if not evaluation:
+        raise HTTPException(status_code=404, detail="Evaluation not found")
+
+    doc = db.query(CVDocument).filter(CVDocument.id == evaluation.cv_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Parent CV not found")
+
+    if str(doc.user_id) != user_id:
+        raise HTTPException(status_code=403, detail="Not your evaluation")
+
+    return CVEvaluationDetailResponse(
+        evaluation_id=evaluation.id,
+        cv_id=evaluation.cv_id,
+        role_id=evaluation.role_id,
+        target_role=evaluation.target_role,
+        overall_score=evaluation.overall_score,
+        ats_score=evaluation.ats_score,
+        evaluation_json=evaluation.evaluation_json or {},
+        created_at=evaluation.created_at,
+    )
+
+@router.get("/my-documents", response_model=list[CVDocumentListItemResponse])
+def list_my_cv_documents(
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
+    docs = (
+        db.query(CVDocument)
+        .filter(CVDocument.user_id == uuid.UUID(user_id))
+        .order_by(CVDocument.created_at.desc())
+        .all()
+    )
+
+    result = []
+
+    for doc in docs:
+        latest_eval = (
+            db.query(CVEvaluation)
+            .filter(CVEvaluation.cv_id == doc.id)
+            .order_by(CVEvaluation.created_at.desc())
+            .first()
+        )
+
+        latest_evaluation = None
+        if latest_eval:
+            latest_evaluation = CVLatestEvaluationSummary(
+                evaluation_id=latest_eval.id,
+                target_role=latest_eval.target_role,
+                overall_score=latest_eval.overall_score,
+                ats_score=latest_eval.ats_score,
+                created_at=latest_eval.created_at,
+            )
+
+        result.append(
+            CVDocumentListItemResponse(
+                cv_id=doc.id,
+                filename=doc.filename,
+                mime_type=doc.mime_type,
+                file_size=doc.file_size,
+                language=doc.language,
+                created_at=doc.created_at,
+                latest_evaluation=latest_evaluation,
+            )
+        )
+
+    return result

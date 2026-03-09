@@ -4,6 +4,7 @@ from app.routers.auth import router as auth_router
 from app.routers.interviews import router as interviews_router
 from app.routers.audio import router as audio_router
 from app.routers.cv import router as cv_router
+from app.routers.cv_quiz import router as cv_quiz_router
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import os
@@ -16,6 +17,7 @@ app.include_router(auth_router)
 app.include_router(interviews_router)
 app.include_router(audio_router)
 app.include_router(cv_router)
+app.include_router(cv_quiz_router)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.get("/")

@@ -10,7 +10,8 @@ from app.models.profile import Profile  # noqa
 from app.models.role import Role  # noqa
 from app.models.question import Question  # noqa
 from app.models.interview import InterviewSession, SessionQuestion  # noqa
-from app.models.cv import CVDocument  # noqa
+from app.models.cv import CVDocument, CVEvaluation  # noqa
+from app.models.cv_quiz import CVQuiz, CVQuizAttempt  # noqa
 
 config = context.config
 
