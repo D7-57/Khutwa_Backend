@@ -7,11 +7,14 @@ from app.db.base import Base
 
 # IMPORTANT: import models so Alembic sees them
 from app.models.profile import Profile  # noqa
-from app.models.role import Role  # noqa
 from app.models.question import Question  # noqa
 from app.models.interview import InterviewSession, SessionQuestion  # noqa
 from app.models.cv import CVDocument, CVEvaluation  # noqa
 from app.models.cv_quiz import CVQuiz, CVQuizAttempt  # noqa
+from app.models.career.role import Role, UserRole #noqa
+from app.models.career.skill import Skill, UserSkill
+from app.models.career.role_skill import RoleSkill
+
 
 config = context.config
 
