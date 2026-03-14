@@ -20,7 +20,7 @@ from app.services.supabase_storage import create_signed_url
 from app.core.security import get_current_user_id
 from app.db.session import get_db
 from app.models.cv import CVDocument, CVEvaluation
-from app.models.role import Role
+from app.models.career.role import Role
 from app.schemas.cv import CVEvaluateRequest, CVEvaluateResponse
 from app.services.cv_evaluation import run_full_cv_evaluation
 

@@ -6,7 +6,7 @@ from app.core.security import get_current_user_id
 from app.db.session import get_db
 from app.models.cv import CVDocument
 from app.models.cv_quiz import CVQuiz, CVQuizAttempt
-from app.models.role import Role
+from app.models.career.role import Role
 from app.schemas.cv_quiz import (
     CVQuizGenerateRequest,
     CVQuizGenerateResponse,

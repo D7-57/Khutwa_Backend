@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import String, DateTime, func, Integer, Text
+from sqlalchemy import Boolean, String, DateTime, func, Integer, Text
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -32,6 +32,9 @@ class Profile(Base):
     languages: Mapped[list] = mapped_column(JSONB, default=list, nullable=True)
     projects: Mapped[list] = mapped_column(JSONB, default=list, nullable=True)
     experiences: Mapped[list] = mapped_column(JSONB, default=list, nullable=True)
+
+    # onboarding tracking
+    onboarding_complete: Mapped[bool] = mapped_column(default=False, nullable=False, server_default="false")
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

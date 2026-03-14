@@ -1,0 +1,104 @@
+from pydantic import BaseModel, Field
+from uuid import UUID
+from datetime import datetime
+
+
+# ── reusable nested shapes for JSONB columns ──
+
+
+class CertificationItem(BaseModel):
+    name: str
+    issuer: str | None = None
+    date: str | None = None  # "2024-06" or free-text
+    url: str | None = None
+
+
+class ProjectItem(BaseModel):
+    name: str
+    description: str | None = None
+    url: str | None = None
+    tech: list[str] = []
+
+
+class ExperienceItem(BaseModel):
+    company: str
+    role: str
+    start_date: str | None = None
+    end_date: str | None = None  # None = "present"
+    description: str | None = None
+
+
+class LanguageItem(BaseModel):
+    language: str
+    level: str | None = None  # native / fluent / intermediate / beginner
+
+
+# ── profile output ──
+
+
+class ProfileOut(BaseModel):
+    id: UUID
+    full_name: str | None = None
+    phone: str | None = None
+    language: str = "en"
+
+    # academic / status
+    bio: str | None = None
+    major: str | None = None
+    university: str | None = None
+    graduation_year: int | None = None
+    current_status: str | None = None  # student | fresh_graduate | job_seeker | employed
+
+    # links
+    linkedin_url: str | None = None
+    github_url: str | None = None
+
+    # JSONB lists
+    certifications: list[CertificationItem] = []
+    languages: list[LanguageItem] = []
+    projects: list[ProjectItem] = []
+    experiences: list[ExperienceItem] = []
+
+    # onboarding progress flag
+    onboarding_complete: bool = False
+
+    created_at: datetime | None = None
+
+    class Config:
+        from_attributes = True
+
+
+# ── profile update (PATCH) – every field optional ──
+
+
+class ProfileUpdate(BaseModel):
+    full_name: str | None = None
+    phone: str | None = None
+    language: str | None = None
+
+    bio: str | None = None
+    major: str | None = None
+    university: str | None = None
+    graduation_year: int | None = None
+    current_status: str | None = None
+
+    linkedin_url: str | None = None
+    github_url: str | None = None
+
+    certifications: list[CertificationItem] | None = None
+    languages: list[LanguageItem] | None = None
+    projects: list[ProjectItem] | None = None
+    experiences: list[ExperienceItem] | None = None
+
+
+# ── onboarding step 1: basic info ──
+
+
+class OnboardingBasicInfo(BaseModel):
+    full_name: str = Field(..., min_length=2, max_length=120)
+    phone: str | None = None
+    major: str | None = None
+    university: str | None = None
+    graduation_year: int | None = None
+    current_status: str | None = None  # student | fresh_graduate | job_seeker | employed
+    language: str = "en"
