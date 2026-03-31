@@ -9,6 +9,8 @@ from app.routers.interviews import router as interviews_router
 from app.routers.audio import router as audio_router
 from app.routers.cv import router as cv_router
 from app.routers.cv_quiz import router as cv_quiz_router
+from app.routers.cv_dir.builder import router as cv_builder_router
+
 
 # ── new organized routers ──
 from app.routers.auth.profile import router as auth_profile_router
@@ -35,6 +37,8 @@ app.include_router(interviews_router)
 app.include_router(audio_router)
 app.include_router(cv_router)
 app.include_router(cv_quiz_router)
+app.include_router(cv_builder_router)
+
 
 # static UI
 app.mount("/static", StaticFiles(directory="static"), name="static")
