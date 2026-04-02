@@ -6,6 +6,7 @@ import os
 # ── existing routers ──
 from app.routers.health import router as health_router
 from app.routers.interviews import router as interviews_router
+from app.routers.interview.community import router as community_questions_router
 from app.routers.audio import router as audio_router
 from app.routers.cv import router as cv_router
 from app.routers.cv_quiz import router as cv_quiz_router
@@ -35,6 +36,7 @@ app.include_router(career_skills_router)
 # existing feature routers
 app.include_router(interviews_router)
 app.include_router(audio_router)
+app.include_router(community_questions_router)
 app.include_router(cv_router)
 app.include_router(cv_quiz_router)
 app.include_router(cv_builder_router)
