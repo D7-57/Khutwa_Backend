@@ -42,9 +42,36 @@ def start_interview(
     uid = UUID(user_id)
     language = _get_language(db, uid)
 
-    qs = db.query(Question).filter(Question.role_name == role_name).all()
+    requested = (role_name or "").strip()
+    norm = requested.lower().replace(" ", "_")
+
+    # Try requested role first, then a common alias used by the app seed data.
+    candidates: list[str] = []
+    if requested:
+        candidates.append(requested)
+    if norm:
+        candidates.append(norm)
+    if norm in ("interview", "interviewer"):
+        candidates.extend(["software_engineer", "software engineer"])
+
+    qs = []
+    for cand in candidates:
+        cand = cand.strip()
+        if not cand:
+            continue
+        qs = db.query(Question).filter(Question.role_name == cand).all()
+        if qs:
+            break
+
+    # Safety net: if role strings don't match any seeded data, fall back to all questions
+    # so the app remains usable.
     if not qs:
-        raise HTTPException(400, detail="No questions for this role")
+        qs = db.query(Question).all()
+    if not qs:
+        raise HTTPException(
+            400,
+            detail="Question bank is empty. Seed the questions table (or check DB role_name values).",
+        )
 
     chosen = random.sample(qs, k=min(num_questions, len(qs)))
 

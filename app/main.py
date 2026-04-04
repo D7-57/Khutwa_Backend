@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import os
@@ -12,18 +13,30 @@ from app.routers.cv_quiz import router as cv_quiz_router
 
 # ── new organized routers ──
 from app.routers.auth.profile import router as auth_profile_router
+from app.routers.auth.confirm_signup import router as auth_confirm_signup_router
 from app.routers.auth.skills import router as auth_skills_router
 from app.routers.career.roles import router as career_roles_router
 from app.routers.career.skills import router as career_skills_router
+from app.routers.questions import router as questions_router
+from app.routers.chat import router as chat_router
 
 
 app = FastAPI(title="Khutwa API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # health
 app.include_router(health_router)
 
 # auth & profile
 app.include_router(auth_profile_router)
+app.include_router(auth_confirm_signup_router)
 app.include_router(auth_skills_router)
 
 # career catalog
@@ -35,6 +48,8 @@ app.include_router(interviews_router)
 app.include_router(audio_router)
 app.include_router(cv_router)
 app.include_router(cv_quiz_router)
+app.include_router(questions_router)
+app.include_router(chat_router)
 
 # static UI
 app.mount("/static", StaticFiles(directory="static"), name="static")
