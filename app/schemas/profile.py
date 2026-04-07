@@ -3,7 +3,8 @@ from uuid import UUID
 
 class ProfileOut(BaseModel):
     id: UUID
-    full_name: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
     phone: str | None = None
     language: str = "en"
 
@@ -11,6 +12,7 @@ class ProfileOut(BaseModel):
         from_attributes = True
 
 class ProfileUpdate(BaseModel):
-    full_name: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
     phone: str | None = None
     language: str | None = None

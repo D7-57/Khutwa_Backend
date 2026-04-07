@@ -1,7 +1,7 @@
 import random
-import math
+import json
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
@@ -23,6 +23,10 @@ from app.services.ai_interview import (
 from app.services.stt import transcribe_audio
 from app.services.tts import synthesize_question_audio
 from app.services.interview_summary import build_interview_summary
+from app.services.interview.body_tracker import (
+    get_tracker, create_tracker, remove_tracker,
+)
+from app.services.interview.tone_analyzer import analyze_tone
 
 router = APIRouter(prefix="/interviews", tags=["interviews"])
 
@@ -49,6 +53,7 @@ class StartInterviewRequest(BaseModel):
     tech_ratio: int = 50  # 0-100 (% technical vs soft)
     company: str | None = None
     use_cv: bool = False
+    mode: str = "text"  # text | audio | video
 
 
 @router.post("/start")
@@ -114,10 +119,14 @@ def start_interview(
         phase="intro",
         current_index=0,
         followup_count=0,
-        intro_evaluation_json={"followup_max": body.followup_max},
+        intro_evaluation_json={"followup_max": body.followup_max, "mode": body.mode},
     )
     db.add(session)
     db.flush()
+
+    # create body language tracker for video mode
+    if body.mode == "video":
+        create_tracker(str(session.id))
 
     # ── create session questions ──
     first_sq_id = None
@@ -146,6 +155,7 @@ def start_interview(
             "tech_ratio": body.tech_ratio,
             "company": body.company,
             "use_cv": body.use_cv,
+            "mode": body.mode,
             "num_questions": len(chosen_questions),
         },
     }
@@ -161,6 +171,7 @@ async def turn(
     session_id: str,
     answer_text: str | None = Form(default=None),
     audio: UploadFile | None = File(default=None),
+    recording_seconds: float = Form(default=0.0),
     user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
@@ -169,6 +180,7 @@ async def turn(
         raise HTTPException(404, detail="Session not found")
 
     language = s.language or "en"
+    mode = (s.intro_evaluation_json or {}).get("mode", "text")
 
     # ── transcribe audio if provided ──
     transcript = None
@@ -186,14 +198,36 @@ async def turn(
     if not answer:
         raise HTTPException(400, detail="Provide answer_text or audio")
 
+    # ── collect tone analysis (audio/video modes) ──
+    tone_desc = ""
+    tone_data = None
+    if mode in ("audio", "video") and recording_seconds > 1 and answer:
+        tone_result = analyze_tone(answer, recording_seconds)
+        tone_desc = tone_result.describe_for_llm()
+        tone_data = tone_result.to_dict()
+
+    # ── collect body language (video mode only) ──
+    body_desc = ""
+    body_data = None
+    tracker = get_tracker(session_id) if mode == "video" else None
+    if tracker:
+        body_summary = tracker.get_summary()
+        body_desc = body_summary.describe_for_llm()
+        body_data = body_summary.to_dict()
+        tracker.reset()  # reset for next question
+
     followup_max = _get_followup_max(s)
 
     # ── INTRO PHASE ──
     if s.phase == "intro":
-        return _handle_intro(s, answer, transcript, language, db)
+        return _handle_intro(s, answer, transcript, language, db,
+                             tone_desc=tone_desc, tone_data=tone_data,
+                             body_desc=body_desc, body_data=body_data)
 
     # ── FINISHED ──
     if s.phase in ("outro", "finished"):
+        if mode == "video":
+            remove_tracker(session_id)
         s.phase = "finished"
         db.commit()
         return {
@@ -204,7 +238,9 @@ async def turn(
         }
 
     # ── BANK PHASE ──
-    return _handle_bank(s, answer, transcript, language, followup_max, db)
+    return _handle_bank(s, answer, transcript, language, followup_max, db,
+                        tone_desc=tone_desc, tone_data=tone_data,
+                        body_desc=body_desc, body_data=body_data)
 
 
 # ─────────────────────────────────────────
@@ -232,6 +268,60 @@ def question_audio(
 
     audio_bytes = synthesize_question_audio(q.question_text, language=s.language)
     return StreamingResponse(BytesIO(audio_bytes), media_type="audio/mpeg")
+
+
+# ─────────────────────────────────────────
+#  VIDEO WEBSOCKET (body language tracking)
+# ─────────────────────────────────────────
+
+
+@router.websocket("/{session_id}/video")
+async def video_ws(websocket: WebSocket, session_id: str):
+    """
+    WebSocket for receiving pre-computed body language signals from the frontend.
+
+    The frontend runs face/hand detection (MediaPipe on-device) and sends
+    signal summaries per frame. The backend accumulates them for evaluation.
+
+    Expected message format:
+    {
+        "eye_contact": 0.85,
+        "smile": 0.3,
+        "frown": 0.0,
+        "hands_visible": true,
+        "face_detected": true,
+        "gesture": "hands_together"
+    }
+    """
+    await websocket.accept()
+
+    tracker = get_tracker(session_id)
+    if not tracker:
+        # session might not be in video mode — create anyway to be safe
+        tracker = create_tracker(session_id)
+
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            msg = json.loads(raw)
+
+            if msg.get("reset"):
+                tracker.reset()
+                continue
+
+            tracker.record_frame(
+                eye_contact=float(msg.get("eye_contact", 0)),
+                smile=float(msg.get("smile", 0)),
+                frown=float(msg.get("frown", 0)),
+                hands_visible=bool(msg.get("hands_visible", False)),
+                face_detected=bool(msg.get("face_detected", False)),
+                gesture=msg.get("gesture", "none"),
+            )
+
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
 
 
 # ─────────────────────────────────────────
@@ -486,11 +576,21 @@ def _handle_intro(
     transcript: str | None,
     language: str,
     db: Session,
+    tone_desc: str = "",
+    tone_data: dict | None = None,
+    body_desc: str = "",
+    body_data: dict | None = None,
 ) -> dict:
     intro_eval = evaluate_intro(answer=answer, language=language)
     s.intro_score = int(intro_eval.get("score", 0))
     s.intro_feedback = intro_eval.get("feedback", "")
-    s.intro_evaluation_json = {**(s.intro_evaluation_json or {}), "intro": intro_eval}
+
+    intro_json = {**(s.intro_evaluation_json or {}), "intro": intro_eval}
+    if tone_data:
+        intro_json["intro_tone"] = tone_data
+    if body_data:
+        intro_json["intro_body_language"] = body_data
+    s.intro_evaluation_json = intro_json
 
     s.phase = "bank"
     s.current_index = 0
@@ -529,6 +629,10 @@ def _handle_bank(
     language: str,
     followup_max: int,
     db: Session,
+    tone_desc: str = "",
+    tone_data: dict | None = None,
+    body_desc: str = "",
+    body_data: dict | None = None,
 ) -> dict:
     sq = _get_current_sq(s, db)
     if not sq:
@@ -548,13 +652,15 @@ def _handle_bank(
 
     q_type = sq.question_type or q.question_type or "technical"
 
-    # evaluate
+    # evaluate — with body language + tone context when available
     evaluation = score_answer(
         answer=answer,
         question=q.question_text,
         role=s.role_name,
         language=language,
         question_type=q_type,
+        body_language_desc=body_desc,
+        tone_desc=tone_desc,
     )
 
     decision = decide_next(
@@ -569,11 +675,16 @@ def _handle_bank(
     # store attempt
     if not sq.evaluation_json:
         sq.evaluation_json = {"attempts": []}
-    sq.evaluation_json["attempts"].append({
+    attempt_record = {
         "answer": answer,
         "evaluation": evaluation,
         "decision": decision,
-    })
+    }
+    if tone_data:
+        attempt_record["tone"] = tone_data
+    if body_data:
+        attempt_record["body_language"] = body_data
+    sq.evaluation_json["attempts"].append(attempt_record)
 
     action = decision.get("action", "next")
     followup_question = (decision.get("question") or "").strip()

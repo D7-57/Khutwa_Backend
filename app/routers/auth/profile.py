@@ -70,7 +70,8 @@ def onboarding_basic(
     uid = UUID(user_id)
     profile = _get_or_create_profile(uid, db)
 
-    profile.full_name = body.full_name
+    profile.first_name = body.first_name.strip()
+    profile.last_name = body.last_name.strip()
     profile.language = body.language
     if body.phone is not None:
         profile.phone = body.phone
@@ -110,7 +111,10 @@ def onboarding_complete(
 def _profile_to_out(profile: Profile) -> ProfileOut:
     return ProfileOut(
         id=profile.id,
-        full_name=profile.full_name,
+        first_name=profile.first_name,
+        last_name=profile.last_name,
+        email=profile.email,
+        username=profile.username,
         phone=profile.phone,
         language=profile.language,
         bio=profile.bio,

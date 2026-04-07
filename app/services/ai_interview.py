@@ -94,6 +94,8 @@ def score_answer(
     role: str,
     language: str,
     question_type: str = "technical",
+    body_language_desc: str = "",
+    tone_desc: str = "",
 ) -> dict:
     criteria = SCORING_CRITERIA.get(question_type, SCORING_CRITERIA["general"])
 
@@ -105,8 +107,18 @@ def score_answer(
         "weaknesses": [],
         "skill_match": "0-100",
         "communication_score": "0-100",
+        "body_language_score": "0-100 (only if data provided, else null)",
         "final_feedback": "",
     }
+
+    # build optional context sections
+    extra_context = ""
+    if body_language_desc:
+        extra_context += f"\n\nBODY LANGUAGE (from computer vision):\n{body_language_desc}"
+        extra_context += "\nIncorporate body language into communication_score and body_language_score."
+    if tone_desc:
+        extra_context += f"\n\nVOCAL TONE ANALYSIS:\n{tone_desc}"
+        extra_context += "\nIncorporate tone metrics into communication_score."
 
     prompt = f"""Evaluate this interview answer.
 
@@ -114,6 +126,7 @@ Question type: {question_type}
 Scoring criteria: {criteria}
 Role: {role}
 {lang_note}
+{extra_context}
 
 Return ONLY JSON matching: {json.dumps(schema)}
 
@@ -234,7 +247,7 @@ Rules:
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        match = re.search(r"\[.*\]", raw, re.DOTALL)
+        match = re.search(r"\[.*]", raw, re.DOTALL)
         if match:
             data = json.loads(match.group(0))
         else:
