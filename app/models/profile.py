@@ -14,7 +14,10 @@ class Profile(Base):
     # matches Supabase auth.users.id
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
 
-    full_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    first_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    last_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    username: Mapped[str | None] = mapped_column(String(80), nullable=True)
     phone: Mapped[str | None] = mapped_column(String(30), nullable=True)
     language: Mapped[str] = mapped_column(String(10), default="en", nullable=False)
 
