@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import String, DateTime, func, Integer, Text
+from sqlalchemy import Boolean, String, DateTime, func, Integer, Text
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -14,8 +14,7 @@ class Profile(Base):
     # matches Supabase auth.users.id
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
 
-    first_name: Mapped[str | None] = mapped_column(String(60), nullable=True)
-    last_name: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    full_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
     phone: Mapped[str | None] = mapped_column(String(30), nullable=True)
     language: Mapped[str] = mapped_column(String(10), default="en", nullable=False)
 
@@ -33,6 +32,9 @@ class Profile(Base):
     languages: Mapped[list] = mapped_column(JSONB, default=list, nullable=True)
     projects: Mapped[list] = mapped_column(JSONB, default=list, nullable=True)
     experiences: Mapped[list] = mapped_column(JSONB, default=list, nullable=True)
+
+    # onboarding tracking
+    onboarding_complete: Mapped[bool] = mapped_column(default=False, nullable=False, server_default="false")
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

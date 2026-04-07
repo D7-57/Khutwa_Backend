@@ -34,20 +34,30 @@ def get_current_user_id(
         header = jwt.get_unverified_header(token)
         alg = header.get("alg")
 
-        # Supabase is giving you ES256 tokens
-        if alg != "ES256":
-            raise HTTPException(status_code=401, detail=f"Unsupported token alg: {alg}")
+        # ES256 (JWKS) — default for hosted Supabase
+        if alg == "ES256":
+            jwks = _get_jwks()
+            payload = jwt.decode(
+                token,
+                jwks,
+                algorithms=["ES256"],
+                options={"verify_aud": False},
+            )
+        # HS256 — legacy / some project settings
+        elif alg == "HS256":
+            payload = jwt.decode(
+                token,
+                settings.SUPABASE_JWT_SECRET,
+                algorithms=["HS256"],
+                options={"verify_aud": False},
+            )
+        else:
+            raise HTTPException(
+                status_code=401,
+                detail=f"Unsupported token alg: {alg}",
+            )
 
-        jwks = _get_jwks()
-
-        payload = jwt.decode(
-            token,
-            jwks,
-            algorithms=["ES256"],
-            options={"verify_aud": False},
-        )
-
-    except (JWTError, httpx.HTTPError):
+    except (JWTError, httpx.HTTPError, ValueError):
         raise HTTPException(status_code=401, detail="Invalid token")
 
     user_id = payload.get("sub")

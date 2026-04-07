@@ -44,24 +44,48 @@ async def upload_cv(
     if not content:
         raise HTTPException(status_code=400, detail="Empty file")
 
-    # 1) upload raw file to Supabase Storage
     obj_id = uuid.uuid4().hex
     safe_name = (file.filename or "cv").replace("/", "_").replace("\\", "_")
     object_path = f"{user_id}/{obj_id}_{safe_name}"
 
-    storage_ref = _supabase_storage_upload(
-        bucket="cvs",
-        object_path=object_path,
-        content=content,
-        content_type=file.content_type or "application/octet-stream",
-        user_jwt=user_jwt,
-    )
+    # 1) Supabase Storage (optional — bucket/RLS may be missing in dev)
+    storage_ref: str
+    try:
+        storage_ref = _supabase_storage_upload(
+            bucket="cvs",
+            object_path=object_path,
+            content=content,
+            content_type=file.content_type or "application/octet-stream",
+            user_jwt=user_jwt,
+        )
+    except HTTPException as e:
+        detail = e.detail
+        dtext = detail if isinstance(detail, str) else str(detail)
+        if e.status_code == 400 and "Supabase upload failed" in dtext:
+            storage_ref = f"inline/{object_path}"
+        else:
+            raise
+    except Exception:
+        storage_ref = f"inline/{object_path}"
 
     # 2) extract text (pdf/docx)
-    raw_text, language = extract_text(file, content)
+    try:
+        raw_text, language = extract_text(file, content)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not read CV file: {e!s}") from e
 
-    # 3) LLM -> structured JSON
-    extracted = llm_extract_structured_cv(raw_text=raw_text, language=language)
+    # 3) LLM -> structured JSON (never fail the whole upload on LLM errors)
+    try:
+        extracted = llm_extract_structured_cv(raw_text=raw_text, language=language)
+    except Exception:
+        extracted = {
+            "parse_error": True,
+            "contact_info": {},
+            "skills": {},
+            "raw_text_excerpt": (raw_text or "")[:2000],
+        }
 
     # 4) store in DB
     doc = CVDocument(
@@ -108,6 +132,12 @@ def get_cv_download_url(
 
     if str(doc.user_id) != user_id:
         raise HTTPException(status_code=403, detail="Not your CV")
+
+    if doc.raw_file_url.startswith("inline/"):
+        raise HTTPException(
+            status_code=404,
+            detail="File is stored locally only (storage not configured). Parsed CV data is still available.",
+        )
 
     # doc.raw_file_url stored like: "cvs/<uid>/<file>"
     # split to bucket + path

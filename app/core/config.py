@@ -8,7 +8,11 @@ class Settings(BaseSettings):
 
     SUPABASE_URL: str
     SUPABASE_ANON_KEY: str
-    SUPABASE_JWT_SECRET: str  # used to verify JWT
+    SUPABASE_JWT_SECRET: str  # HS256 JWT verification
+    SUPABASE_SERVICE_ROLE_KEY: str | None = None  # admin API (confirm email, etc.)
+
+    # Dev-only: same value in Flutter .env as KHUTWA_DEV_CONFIRM_KEY for auto email confirm
+    KHUTWA_DEV_CONFIRM_KEY: str | None = None
 
     OPENAI_API_KEY: str
 
