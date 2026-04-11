@@ -308,3 +308,11 @@ def list_my_cv_documents(
         )
 
     return result
+
+@router.delete("/{cv_id}", status_code=204)
+def delete_cv(cv_id: str, db: Session = Depends(get_db), user_id: str = Depends(get_current_user_id)):
+    doc = db.query(CVDocument).filter(CVDocument.id == uuid.UUID(cv_id)).first()
+    if not doc: raise HTTPException(404, "CV not found")
+    if str(doc.user_id) != user_id: raise HTTPException(403, "Not your CV")
+    db.delete(doc)
+    db.commit()
