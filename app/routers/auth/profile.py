@@ -2,7 +2,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.core.security import get_current_user_id
+from app.core.security import get_current_user_id, get_current_auth_user, AuthUser
 from app.db.session import get_db
 from app.models.profile import Profile
 from app.schemas.auth.profile import (
@@ -14,13 +14,46 @@ from app.schemas.auth.profile import (
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-def _get_or_create_profile(uid: UUID, db: Session) -> Profile:
+def _get_or_create_profile(
+    uid: UUID,
+    db: Session,
+    *,
+    email: str | None = None,
+    phone: str | None = None,
+    first_name: str | None = None,
+    last_name: str | None = None,
+) -> Profile:
     profile = db.get(Profile, uid)
     if profile is None:
-        profile = Profile(id=uid, language="en")
+        profile = Profile(
+            id=uid,
+            language="en",
+            email=email,
+            phone=phone,
+            first_name=first_name,
+            last_name=last_name,
+        )
         db.add(profile)
         db.commit()
         db.refresh(profile)
+    else:
+        # Back-fill any nulls from the JWT claims (one-time repair)
+        changed = False
+        if profile.email is None and email:
+            profile.email = email
+            changed = True
+        if profile.phone is None and phone:
+            profile.phone = phone
+            changed = True
+        if profile.first_name is None and first_name:
+            profile.first_name = first_name
+            changed = True
+        if profile.last_name is None and last_name:
+            profile.last_name = last_name
+            changed = True
+        if changed:
+            db.commit()
+            db.refresh(profile)
     return profile
 
 
@@ -29,11 +62,17 @@ def _get_or_create_profile(uid: UUID, db: Session) -> Profile:
 
 @router.get("/me", response_model=ProfileOut)
 def me(
-    user_id: str = Depends(get_current_user_id),
+    auth: AuthUser = Depends(get_current_auth_user),
     db: Session = Depends(get_db),
 ):
-    uid = UUID(user_id)
-    profile = _get_or_create_profile(uid, db)
+    uid = UUID(auth.id)
+    profile = _get_or_create_profile(
+        uid, db,
+        email=auth.email,
+        phone=auth.phone,
+        first_name=auth.first_name,
+        last_name=auth.last_name,
+    )
     return _profile_to_out(profile)
 
 

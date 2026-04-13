@@ -23,6 +23,7 @@ class ProjectItem(BaseModel):
 class ExperienceItem(BaseModel):
     company: str
     role: str
+    location: str | None = None
     start_date: str | None = None
     end_date: str | None = None  # None = "present"
     description: str | None = None
@@ -38,7 +39,10 @@ class LanguageItem(BaseModel):
 
 class ProfileOut(BaseModel):
     id: UUID
-    full_name: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
+    email: str | None = None
+    username: str | None = None
     phone: str | None = None
     language: str = "en"
 
@@ -72,7 +76,8 @@ class ProfileOut(BaseModel):
 
 
 class ProfileUpdate(BaseModel):
-    full_name: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
     phone: str | None = None
     language: str | None = None
 
@@ -95,7 +100,8 @@ class ProfileUpdate(BaseModel):
 
 
 class OnboardingBasicInfo(BaseModel):
-    full_name: str = Field(..., min_length=2, max_length=120)
+    first_name: str = Field(..., min_length=1, max_length=80)
+    last_name: str = Field(..., min_length=1, max_length=80)
     phone: str | None = None
     major: str | None = None
     university: str | None = None

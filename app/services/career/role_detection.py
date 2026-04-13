@@ -1,86 +1,73 @@
 import json
+import re
 from uuid import UUID
 
 from openai import OpenAI
 
 from app.core.config import settings
 from app.schemas.career.roles import RoleDetectResponse, RoleSuggestion
+from app.schemas.career.questionnaire import QuestionnaireAnswers
+from app.services.career.prompts import SYSTEM_PROMPT, build_user_prompt
 
 client = OpenAI(api_key=settings.OPENAI_API_KEY)
+
+# Threshold below which we drop a suggestion
+MIN_CONFIDENCE = 0.40
+MAX_SUGGESTIONS = 5
 
 
 def detect_roles(
     *,
-    roles: list,  # list of Role ORM objects (leaf roles only)
-    answers: dict | None = None,
+    roles: list,
+    answers: QuestionnaireAnswers | None = None,
     message: str | None = None,
     context: dict | None = None,
 ) -> RoleDetectResponse:
     """
-    Given questionnaire answers or a free-text message, use OpenAI to
-    suggest the top 3-5 matching roles from the available catalog.
+    Suggest the top 3–5 matching roles given questionnaire answers,
+    a free-text message, and/or CV context.
+
+    At least one of answers, message, or context must be provided.
     """
 
-    # build role catalog string for the prompt
-    role_catalog = []
-    for r in roles:
-        role_catalog.append({
+    # Build catalog — only leaf roles, trim descriptions to save tokens
+    role_catalog = [
+        {
             "id": str(r.id),
             "name": r.name,
-            "description": r.description or "",
-        })
+            "description": (r.description or "")[:120],
+        }
+        for r in roles
+    ]
 
-    # build user input section
-    user_input_parts = []
-    if answers:
-        user_input_parts.append(f"Questionnaire answers:\n{json.dumps(answers, ensure_ascii=False, indent=2)}")
-    if message:
-        user_input_parts.append(f"User message: {message}")
-    if context:
-        user_input_parts.append(f"Additional context:\n{json.dumps(context, ensure_ascii=False, indent=2)}")
-
-    user_input = "\n\n".join(user_input_parts)
-
-    system_prompt = """You are a career counselor AI for Khutwa, a job readiness platform for Saudi graduates and job seekers.
-
-Your task: Given the user's input (questionnaire answers or free-text description), suggest the top 3-5 best matching career roles from the available catalog.
-
-RULES:
-- ONLY suggest roles that exist in the provided catalog (use exact IDs).
-- For each suggestion, provide a confidence score (0.0-1.0) and a brief reason in the same language the user used.
-- If the input is too vague, set follow_up to a clarifying question.
-- Be practical and consider the Saudi job market context.
-
-Respond ONLY in valid JSON with this exact shape:
-{
-  "suggestions": [
-    {"role_id": "uuid", "role_name": "name", "confidence": 0.85, "reason": "brief reason"}
-  ],
-  "follow_up": null or "clarifying question"
-}"""
-
-    user_prompt = f"""Available roles catalog:
-{json.dumps(role_catalog, ensure_ascii=False, indent=2)}
-
-User input:
-{user_input}"""
-
-    resp = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.3,
+    user_prompt = build_user_prompt(
+        role_catalog=role_catalog,
+        answers=answers,
+        message=message,
+        context=context,
     )
+
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.2,
+            response_format={"type": "json_object"},
+            timeout=20,
+        )
+    except Exception as e:
+        # Surface API errors clearly
+        raise RuntimeError(f"OpenAI API call failed: {e}") from e
 
     content = resp.choices[0].message.content or "{}"
 
     try:
         data = json.loads(content)
     except json.JSONDecodeError:
-        # try to extract JSON from markdown fences
-        import re
+        # Fallback: try to extract JSON from markdown fences
         match = re.search(r"```(?:json)?\s*(.*?)```", content, re.DOTALL)
         if match:
             data = json.loads(match.group(1))
@@ -90,28 +77,46 @@ User input:
                 follow_up="I couldn't process the response. Could you describe your interests in more detail?",
             )
 
-    # validate role IDs exist in our catalog
+    # ── Validate & filter ─────────────────────────────────────────────────
     valid_ids = {str(r.id) for r in roles}
     role_name_map = {str(r.id): r.name for r in roles}
 
     suggestions = []
     for s in data.get("suggestions", []):
         rid = s.get("role_id", "")
-        if rid in valid_ids:
-            suggestions.append(
-                RoleSuggestion(
-                    role_id=UUID(rid),
-                    role_name=role_name_map[rid],
-                    confidence=min(1.0, max(0.0, float(s.get("confidence", 0.5)))),
-                    reason=s.get("reason", ""),
-                )
-            )
+        confidence = min(1.0, max(0.0, float(s.get("confidence", 0))))
 
-    # sort by confidence descending, cap at 5
+        if rid not in valid_ids:
+            continue  # hallucinated role ID — drop
+        if confidence < MIN_CONFIDENCE:
+            continue  # below threshold — drop
+
+        suggestions.append(
+            RoleSuggestion(
+                role_id=UUID(rid),
+                role_name=role_name_map[rid],
+                confidence=confidence,
+                reason=s.get("reason", "").strip(),
+            )
+        )
+
     suggestions.sort(key=lambda x: x.confidence, reverse=True)
-    suggestions = suggestions[:5]
+    suggestions = suggestions[:MAX_SUGGESTIONS]
+
+    # ── Detect genuinely ambiguous results ─────────────────────────────────
+    follow_up = data.get("follow_up")
+    if not follow_up and len(suggestions) >= 2:
+        gap = suggestions[0].confidence - suggestions[1].confidence
+        if gap < 0.10:
+            follow_up = (
+                "You seem like a strong fit for both "
+                + suggestions[0].role_name
+                + " and "
+                + suggestions[1].role_name
+                + ". Would you like me to compare what a typical day looks like in each?"
+            )
 
     return RoleDetectResponse(
         suggestions=suggestions,
-        follow_up=data.get("follow_up"),
+        follow_up=follow_up,
     )
