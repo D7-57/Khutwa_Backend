@@ -17,6 +17,7 @@ from app.routers.cv_dir.builder import router as cv_builder_router
 # ── new organized routers ──
 from app.routers.auth.profile import router as auth_profile_router
 from app.routers.auth.skills import router as auth_skills_router
+from app.routers.auth.onboarding_cv import router as onboarding_cv_router
 from app.routers.career.roles import router as career_roles_router
 from app.routers.career.skills import router as career_skills_router
 
@@ -38,6 +39,7 @@ app.include_router(health_router)
 # auth & profile
 app.include_router(auth_profile_router)
 app.include_router(auth_skills_router)
+app.include_router(onboarding_cv_router)
 
 # career catalog
 app.include_router(career_roles_router)
