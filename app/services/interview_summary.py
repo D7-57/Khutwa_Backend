@@ -1,5 +1,6 @@
 from __future__ import annotations
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
 from uuid import UUID
 
 from app.models.interview import InterviewSession, SessionQuestion
@@ -11,9 +12,9 @@ def build_interview_summary(db: Session, session_id: UUID) -> dict:
     if not s:
         return {"error": "Session not found"}
 
-    rows = (
-        db.query(SessionQuestion, Question)
-        .join(Question, Question.id == SessionQuestion.question_id)
+    # Get all session questions — LEFT JOIN with Question (question_id may be null for CV Qs)
+    sqs = (
+        db.query(SessionQuestion)
         .filter(SessionQuestion.session_id == s.id)
         .order_by(SessionQuestion.id)
         .all()
@@ -22,24 +23,55 @@ def build_interview_summary(db: Session, session_id: UUID) -> dict:
     questions = []
     answered_scores = []
 
-    for sq, q in rows:
-        # extract tone + body from the last attempt if available
+    language = s.language or "en"
+
+    for sq in sqs:
+        # Resolve question text: from SessionQuestion.question_text (CV) or Question table (bank)
+        if sq.question_text:
+            q_text = sq.question_text
+            q_source = "cv_generated"
+        elif sq.question_id:
+            q = db.get(Question, sq.question_id)
+            q_text = q.get_text(language) if q else ""
+            q_source = "bank"
+        else:
+            q_text = ""
+            q_source = "unknown"
+
         last_attempt = {}
         if sq.evaluation_json and sq.evaluation_json.get("attempts"):
             last_attempt = sq.evaluation_json["attempts"][-1]
 
         item = {
             "session_question_id": str(sq.id),
-            "question_id": str(q.id),
-            "question_text": q.question_text,
-            "question_type": sq.question_type or q.question_type,
+            "question_id": str(sq.question_id) if sq.question_id else None,
+            "question_text": q_text,
+            "question_type": sq.question_type or "general",
+            "question_source": q_source,
             "user_answer": sq.user_answer,
             "score": sq.score,
             "ai_feedback": sq.ai_feedback,
             "attempt_count": len(sq.evaluation_json.get("attempts", [])) if sq.evaluation_json else 0,
         }
 
-        # include tone + body data if present
+        # Include answer_type and correct_answer from evaluation if present
+        eval_data = last_attempt.get("evaluation", {})
+        if eval_data.get("answer_type"):
+            item["answer_type"] = eval_data["answer_type"]
+        if eval_data.get("correct_answer"):
+            item["correct_answer"] = eval_data["correct_answer"]
+        if eval_data.get("strengths"):
+            item["strengths"] = eval_data["strengths"]
+        if eval_data.get("weaknesses"):
+            item["weaknesses"] = eval_data["weaknesses"]
+        if eval_data.get("skill_match"):
+            item["skill_match"] = eval_data["skill_match"]
+        if eval_data.get("communication_score"):
+            item["communication_score"] = eval_data["communication_score"]
+        if eval_data.get("final_feedback"):
+            item["final_feedback"] = eval_data["final_feedback"]
+
+        # Tone + body data
         if last_attempt.get("tone"):
             item["tone"] = last_attempt["tone"]
         if last_attempt.get("body_language"):
@@ -51,22 +83,19 @@ def build_interview_summary(db: Session, session_id: UUID) -> dict:
 
     bank_avg = int(sum(answered_scores) / len(answered_scores)) if answered_scores else None
 
-    # include intro as 20% weight if available
     if s.intro_score is not None and bank_avg is not None:
         overall = int(0.2 * s.intro_score + 0.8 * bank_avg)
     else:
         overall = bank_avg
 
-    # extract session config
     config = s.intro_evaluation_json or {}
-    mode = config.get("mode", "text")
 
     result = {
         "session_id": str(s.id),
         "role_name": s.role_name,
         "language": s.language,
         "phase": s.phase,
-        "mode": mode,
+        "mode": config.get("mode", "text"),
         "question_source": s.question_source,
         "company": s.company,
         "intro_score": s.intro_score,
@@ -76,7 +105,6 @@ def build_interview_summary(db: Session, session_id: UUID) -> dict:
         "questions": questions,
     }
 
-    # include intro-level tone/body if captured
     if config.get("intro_tone"):
         result["intro_tone"] = config["intro_tone"]
     if config.get("intro_body_language"):
