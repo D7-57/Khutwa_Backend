@@ -20,6 +20,7 @@ from app.routers.auth.skills import router as auth_skills_router
 from app.routers.auth.onboarding_cv import router as onboarding_cv_router
 from app.routers.career.roles import router as career_roles_router
 from app.routers.career.skills import router as career_skills_router
+from app.routers.roadmap.roadmap import router as roadmap_router
 
 
 app = FastAPI(title="Khutwa API")
@@ -44,6 +45,9 @@ app.include_router(onboarding_cv_router)
 # career catalog
 app.include_router(career_roles_router)
 app.include_router(career_skills_router)
+
+# roadmap
+app.include_router(roadmap_router)
 
 # existing feature routers
 app.include_router(interviews_router)

@@ -183,13 +183,8 @@ async def onboarding_cv_upload(
     """
     uid = UUID(user_id)
 
-    # Check onboarding state
+    # Get or create profile
     profile = db.get(Profile, uid)
-    if profile and profile.onboarding_complete:
-        raise HTTPException(
-            status_code=400,
-            detail="Onboarding already complete. Use the profile edit endpoint instead.",
-        )
 
     # Read file
     data = await cv.read()
