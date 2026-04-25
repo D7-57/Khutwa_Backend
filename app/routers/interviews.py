@@ -31,6 +31,12 @@ def _get_language(db: Session, user_id: UUID) -> str:
     return "en"
 
 
+def _question_text(q: Question, language: str) -> str:
+    if language == "ar":
+        return (q.question_text_ar or q.question_text_en or "").strip()
+    return (q.question_text_en or q.question_text_ar or "").strip()
+
+
 @router.post("/start")
 def start_interview(
     role_name: str,
@@ -126,7 +132,7 @@ def question_audio(
     if not q:
         raise HTTPException(404, detail="Question not found")
 
-    audio_bytes = synthesize_question_audio(q.question_text)
+    audio_bytes = synthesize_question_audio(_question_text(q, s.language or "en"))
     return StreamingResponse(BytesIO(audio_bytes), media_type="audio/mpeg")
 
 
@@ -190,11 +196,12 @@ async def turn(
             return {"phase": "outro", "prompt_type": "outro", "prompt_text": outro, "transcript": transcript, "intro_evaluation": intro_eval}
 
         q = db.get(Question, sq.question_id)
+        q_text = _question_text(q, language)
         return {
             "phase": "bank",
             "prompt_type": "bank_question",
             "question_id": str(q.id),
-            "prompt_text": q.question_text,
+            "prompt_text": q_text,
             "transcript": transcript,
             "intro_evaluation": intro_eval,
         }
@@ -288,15 +295,16 @@ async def turn(
         raise HTTPException(404, detail="Question not found")
 
     # 3) Evaluate this attempt
+    q_text = _question_text(q, language)
     evaluation = score_answer(
         answer=answer,
-        question=q.question_text,
+        question=q_text,
         role=s.role_name,
         language=language,
     )
 
     decision = decide_next(
-        question=q.question_text,
+        question=q_text,
         answer=answer,
         evaluation=evaluation,
         role=s.role_name,
@@ -389,12 +397,13 @@ async def turn(
     db.commit()
 
     next_q = db.get(Question, next_sq.question_id)
+    next_q_text = _question_text(next_q, language)
     return {
         "phase": "bank",
         "action": "next",
         "prompt_type": "bank_question",
         "question_id": str(next_q.id),
-        "prompt_text": next_q.question_text,
+        "prompt_text": next_q_text,
         "evaluation": final_eval,
         "transcript": transcript,
         "total_score": s.total_score,

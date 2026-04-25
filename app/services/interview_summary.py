@@ -22,10 +22,16 @@ def build_interview_summary(db: Session, session_id: UUID) -> dict:
     answered_scores = []
 
     for sq, q in rows:
+        q_text = (
+            (q.question_text_ar if s.language == "ar" else q.question_text_en)
+            or q.question_text_en
+            or q.question_text_ar
+            or ""
+        )
         item = {
             "session_question_id": str(sq.id),
             "question_id": str(q.id),
-            "question_text": q.question_text,
+            "question_text": q_text,
             "user_answer": sq.user_answer,
             "score": sq.score,
             "ai_feedback": sq.ai_feedback,

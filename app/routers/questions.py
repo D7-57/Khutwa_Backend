@@ -35,7 +35,8 @@ def submit_community_question(
 
     q = Question(
         role_name=_norm_role_name(body.role_name),
-        question_text=text,
+        question_text_en=text,
+        question_text_ar=text,
         difficulty=max(1, min(5, body.difficulty)),
         source="community",
     )
