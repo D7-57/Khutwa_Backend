@@ -382,6 +382,76 @@ def build_overall_recommendations(role_fit: dict, ats: dict) -> list[str]:
     return deduped[:6]
 
 
+def _score_experience_depth(evaluation_json: dict) -> int:
+    """Derive experience depth score from extracted data signals."""
+    role_fit = evaluation_json.get("role_fit", {})
+    ats = evaluation_json.get("ats", {})
+
+    score = 50  # baseline
+
+    # Boost for having experience entries detected
+    checklist = ats.get("checklist", {})
+    if checklist.get("has_experience"):
+        score += 15
+    if checklist.get("has_dates"):
+        score += 10
+    if checklist.get("has_bullets"):
+        score += 10
+
+    # Boost from strengths / penalize from gaps
+    strengths = role_fit.get("strengths", [])
+    gaps = role_fit.get("gaps", [])
+    score += min(len(strengths) * 5, 15)
+    score -= min(len(gaps) * 3, 10)
+
+    return _clamp_score(score)
+
+
+def _score_completeness(checklist: dict) -> int:
+    """Derive completeness score from ATS checklist."""
+    if not checklist:
+        return 50
+
+    checks = [
+        ("has_contact_info", 20),
+        ("has_section_headings", 15),
+        ("has_dates", 10),
+        ("has_bullets", 10),
+        ("has_experience", 15),
+        ("has_education", 10),
+        ("has_skills", 10),
+    ]
+
+    score = 10  # baseline
+    for key, weight in checks:
+        if checklist.get(key):
+            score += weight
+
+    # Penalize tables/columns
+    if checklist.get("likely_tables_or_columns"):
+        score -= 10
+
+    return _clamp_score(score)
+
+
+def build_radar_scores(evaluation_json: dict) -> dict:
+    """
+    Derive 6-dimension radar scores from existing evaluation data.
+    No extra AI calls needed — everything comes from role_fit and ats.
+    """
+    role_fit = evaluation_json.get("role_fit", {})
+    ats = evaluation_json.get("ats", {})
+
+    return {
+        "ats_compatibility": ats.get("score", 0),
+        "skills_relevance": role_fit.get("score", 0),
+        "experience_depth": _score_experience_depth(evaluation_json),
+        "keyword_coverage": ats.get("keyword_score", 0),
+        "format_quality": ats.get("format_score", 0),
+        "completeness": _score_completeness(ats.get("checklist", {})),
+    }
+
+
 def run_full_cv_evaluation(
     raw_text: str,
     extracted_data: dict,
@@ -408,9 +478,17 @@ def run_full_cv_evaluation(
 
     overall_recommendations = build_overall_recommendations(role_fit=role_fit, ats=ats)
 
+    # Build intermediate result for radar score derivation
+    eval_data = {
+        "role_fit": role_fit,
+        "ats": ats,
+    }
+    radar_scores = build_radar_scores(eval_data)
+
     return {
         "role_profile": role_profile,
         "role_fit": role_fit,
         "ats": ats,
+        "radar_scores": radar_scores,
         "overall_recommendations": overall_recommendations,
     }

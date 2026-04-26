@@ -134,12 +134,19 @@ ul.bullets li {
 <!-- HEADER -->
 <div class="header">
   <div class="name">{{ contact.name }}</div>
+  {% if job_target %}<div style="font-size: 10.5pt; font-style: italic; margin-bottom: 2pt;">{{ job_target }}</div>{% endif %}
   <div class="contact-line">
     {% if contact.location %}{{ contact.location }}{% endif %}
     {% if contact.phone %}{% if contact.location %} | {% endif %}{{ contact.phone }}{% endif %}
-    {% if contact.email %}{% if contact.phone or contact.location %} | {% endif %}{{ contact.email }}{% endif %}
-    {% for link in contact.links %}
-      {% if link %} | {{ link }}{% endif %}
+    {% if contact.email %}{% if contact.phone or contact.location %} | {% endif %}<a href="mailto:{{ contact.email }}" style="color:#000;text-decoration:none;">{{ contact.email }}</a>{% endif %}
+    {% for link in contact.structured_links %}
+      {% if link.type == 'linkedin' %}
+        | <a href="{{ link.url }}" style="color:#000;text-decoration:none;font-weight:bold;">LinkedIn</a>
+      {% elif link.type == 'github' %}
+        | <a href="{{ link.url }}" style="color:#000;text-decoration:none;font-weight:bold;">GitHub</a>
+      {% else %}
+        | <a href="{{ link.url }}" style="color:#000;text-decoration:none;">{{ link.label }}</a>
+      {% endif %}
     {% endfor %}
   </div>
 </div>

@@ -21,8 +21,8 @@ from app.core.security import get_current_user_id
 from app.db.session import get_db
 from app.models.cv import CVDocument, CVEvaluation
 from app.models.career.role import Role
-from app.schemas.cv import CVEvaluateRequest, CVEvaluateResponse
-from app.services.cv_evaluation import run_full_cv_evaluation
+from app.schemas.cv import CVEvaluateRequest, CVEvaluateResponse, JobMatchRequest, JobMatchResponse
+from app.services.cv_evaluation import run_full_cv_evaluation, build_role_profile, score_ats, build_radar_scores
 
 router = APIRouter(prefix="/cv", tags=["cv"])
 
@@ -316,3 +316,66 @@ def delete_cv(cv_id: str, db: Session = Depends(get_db), user_id: str = Depends(
     if str(doc.user_id) != user_id: raise HTTPException(403, "Not your CV")
     db.delete(doc)
     db.commit()
+
+
+@router.post("/{cv_id}/match-job", response_model=JobMatchResponse)
+def match_cv_to_job(
+    cv_id: str,
+    payload: JobMatchRequest,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
+    """
+    Match a CV against a pasted job description.
+    Reuses existing build_role_profile + score_ats pipeline.
+    """
+    try:
+        cv_uuid = uuid.UUID(cv_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid cv_id")
+
+    doc = db.query(CVDocument).filter(CVDocument.id == cv_uuid).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="CV not found")
+    if str(doc.user_id) != user_id:
+        raise HTTPException(status_code=403, detail="Not your CV")
+
+    # Build role profile from the pasted JD
+    role_profile = build_role_profile(
+        role_name=payload.job_title or "Target Role",
+        role_description=payload.job_description,
+    )
+
+    # Score ATS using existing pipeline
+    ats = score_ats(
+        raw_text=doc.raw_text or "",
+        extracted_data=doc.extracted_data or {},
+        role_profile=role_profile,
+    )
+
+    # Build radar scores from the match
+    eval_data = {
+        "role_fit": {"score": ats.get("keyword_score", 0)},
+        "ats": ats,
+    }
+    radar = build_radar_scores(eval_data)
+
+    # Determine recommendation
+    score = ats["score"]
+    if score >= 80:
+        recommendation = "Strong match — your CV aligns well with this job description."
+    elif score >= 60:
+        recommendation = "Good match — consider adding missing keywords to strengthen your application."
+    elif score >= 40:
+        recommendation = "Moderate match — significant gaps exist. Tailor your CV before applying."
+    else:
+        recommendation = "Weak match — this role may require skills or experience not reflected in your CV."
+
+    return JobMatchResponse(
+        match_score=score,
+        matched_keywords=ats["matched_keywords"],
+        missing_keywords=ats["missing_keywords"],
+        hard_requirement_flags=ats.get("hard_requirement_flags", []),
+        recommendation=recommendation,
+        radar_scores=radar,
+    )

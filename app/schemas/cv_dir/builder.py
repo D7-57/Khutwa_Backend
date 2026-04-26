@@ -127,6 +127,7 @@ class CVData(BaseModel):
     """
     contact_info: CVContactInfo = CVContactInfo()
     summary: str = ""
+    job_target: str = ""
     skills: CVSkills | list[str] = CVSkills()
     experience: list[CVExperienceItem] = []
     education: list[CVEducationItem] = []

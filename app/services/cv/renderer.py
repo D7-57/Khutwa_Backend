@@ -94,6 +94,25 @@ def _prepare_template_context(cv_data: dict, language: str = "en") -> dict:
         sk for sk in remaining_technical if sk not in tools_tech
     ]
 
+    # Parse structured links (detect LinkedIn, GitHub)
+    raw_links = contact.get("links") or []
+    structured_links = []
+    for link in raw_links:
+        if not link:
+            continue
+        link_str = str(link).strip()
+        lower = link_str.lower()
+        url = link_str if link_str.startswith("http") else f"https://{link_str}"
+        if "linkedin" in lower:
+            structured_links.append({"type": "linkedin", "url": url, "label": "LinkedIn"})
+        elif "github" in lower:
+            structured_links.append({"type": "github", "url": url, "label": "GitHub"})
+        else:
+            structured_links.append({"type": "other", "url": url, "label": link_str})
+
+    # Extract job target from keywords or summary
+    job_target = cv_data.get("job_target", "") or ""
+
     return {
         "lang": language,
         "contact": {
@@ -101,8 +120,10 @@ def _prepare_template_context(cv_data: dict, language: str = "en") -> dict:
             "email": contact.get("email", ""),
             "phone": contact.get("phone", ""),
             "location": contact.get("location", ""),
-            "links": contact.get("links") or [],
+            "links": raw_links,
+            "structured_links": structured_links,
         },
+        "job_target": job_target,
         "summary": cv_data.get("summary", ""),
         "experience": experience,
         "education": education,
