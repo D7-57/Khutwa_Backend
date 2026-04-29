@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     SUPABASE_URL: str
     SUPABASE_ANON_KEY: str
     SUPABASE_JWT_SECRET: str  # used to verify JWT
+    SUPABASE_SERVICE_ROLE_KEY: str = ""  # needed for confirm-signup admin call
 
     OPENAI_API_KEY: str
 
