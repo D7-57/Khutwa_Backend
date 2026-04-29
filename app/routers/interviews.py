@@ -31,6 +31,8 @@ from app.services.ai_interview import (
     evaluate_intro,
     evaluate_and_decide,
     generate_cv_questions,
+    classify_user_input,
+    generate_brief_explanation,
     pick_intro,
     OUTRO_TEXT,
 )
@@ -52,6 +54,7 @@ QUESTION_MIX = {
 }
 
 MAX_REASK = 2  # after this many re-asks, auto-score 0 and move on
+MAX_CLARIFY = 2  # max clarification questions per interview question
 
 REASK_TEXT = {
     "ar": "لم أسمع إجابتك. ممكن تعيد الإجابة؟",
@@ -60,6 +63,10 @@ REASK_TEXT = {
 OFF_TOPIC_TEXT = {
     "ar": "يبدو أن إجابتك غير متعلقة بالسؤال. ممكن تحاول تجاوب على السؤال المطروح؟",
     "en": "That doesn't seem related to the question. Could you try answering the question asked?",
+}
+CLARIFY_EXHAUSTED_TEXT = {
+    "ar": "أعتقد إنك فهمت السؤال الحين. حاول تجاوب بأفضل ما عندك.",
+    "en": "I think you have enough context now. Please give it your best shot.",
 }
 REASK_EXHAUSTED_TEXT = {
     "ar": "خلنا ننتقل للسؤال التالي.",
@@ -94,6 +101,27 @@ def start_interview(
     profile = db.get(Profile, uid)
     user_name = profile.first_name if profile and profile.first_name else None
 
+    # ── Extract profile context for personalization ──
+    profile_context = {}
+    if profile:
+        status = (profile.current_status or "").strip().lower()
+        if status:
+            profile_context["status"] = status  # student | graduate | employed
+
+        # Compute years of experience from experiences JSON
+        experiences = profile.experiences or []
+        if isinstance(experiences, list) and experiences:
+            profile_context["years_of_experience"] = len(experiences)
+            profile_context["has_experience"] = True
+        else:
+            profile_context["years_of_experience"] = 0
+            profile_context["has_experience"] = False
+
+        if profile.major:
+            profile_context["major"] = profile.major
+        if profile.university:
+            profile_context["university"] = profile.university
+
     # ── Build question mix ──
     all_questions = _build_question_mix(
         db=db,
@@ -119,7 +147,7 @@ def start_interview(
         phase="rapid" if is_rapid else "intro",
         current_index=0,
         followup_count=0,
-        intro_evaluation_json={"followup_max": body.followup_max, "mode": body.mode},
+        intro_evaluation_json={"followup_max": body.followup_max, "mode": body.mode, "profile_context": profile_context},
     )
     db.add(session)
     db.flush()
@@ -554,8 +582,7 @@ def rapid_submit(
         raise HTTPException(400, detail="Session is not rapid mode")
 
     language = s.language or "en"
-
-    # Get all session questions in order
+    profile_context = (s.intro_evaluation_json or {}).get("profile_context")
     sqs = (
         db.query(SessionQuestion)
         .filter(SessionQuestion.session_id == s.id)
@@ -591,6 +618,7 @@ def rapid_submit(
         result = evaluate_and_decide(
             answer=answer, question=q_text, role=s.role_name,
             language=language, question_type=q_type,
+            profile_context=profile_context,
         )
 
         evaluation = {
@@ -763,11 +791,105 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
     q_text = _get_sq_question_text(sq, db, language)
     q_type = sq.question_type or "technical"
 
-    # ── Single LLM call ──
+    # ── Determine what question text to evaluate against ──
+    # If we're in a follow-up, the user is answering the follow-up question,
+    # NOT the original question. We must evaluate against the follow-up text.
+    eval_question_text = q_text  # default: the original question
+    is_followup_answer = s.followup_count > 0
+    if is_followup_answer:
+        # Get the follow-up question from the last attempt that triggered it
+        attempts = (sq.evaluation_json or {}).get("attempts", [])
+        for att in reversed(attempts):
+            if att.get("action") == "follow_up" and att.get("follow_up_question"):
+                eval_question_text = att["follow_up_question"]
+                break
+
+    # ── Clarification detection ──
+    classification = classify_user_input(
+        user_text=answer,
+        current_question=eval_question_text,
+        role=s.role_name,
+        language=language,
+    )
+
+    if classification.get("type") == "clarification":
+        if not sq.evaluation_json:
+            sq.evaluation_json = {"attempts": [], "clarify_count": 0}
+        clarify_count = sq.evaluation_json.get("clarify_count", 0)
+
+        if clarify_count >= MAX_CLARIFY:
+            exhaust_msg = CLARIFY_EXHAUSTED_TEXT.get(language, CLARIFY_EXHAUSTED_TEXT["en"])
+            exhaust_prompt = exhaust_msg + f"\n\n{eval_question_text}"
+            db.commit()
+            return {
+                "phase": "bank", "action": "clarify_exhausted",
+                "prompt_type": "clarification", "prompt_text": exhaust_prompt,
+                "question_id": str(sq.question_id) if sq.question_id else None,
+                "question_type": q_type, "transcript": transcript,
+                "clarify_count": clarify_count, "clarify_max": MAX_CLARIFY,
+            }
+
+        clarification_response = classification.get("response", "")
+        if clarification_response:
+            sq.evaluation_json = {**sq.evaluation_json, "clarify_count": clarify_count + 1}
+            db.flush()
+            clarify_prompt = clarification_response + f"\n\n{eval_question_text}"
+            db.commit()
+            return {
+                "phase": "bank", "action": "clarify",
+                "prompt_type": "clarification", "prompt_text": clarify_prompt,
+                "question_id": str(sq.question_id) if sq.question_id else None,
+                "question_type": q_type, "transcript": transcript,
+                "clarify_count": clarify_count + 1, "clarify_max": MAX_CLARIFY,
+            }
+
+    if classification.get("type") == "curiosity":
+        curiosity_response = classification.get("response", "")
+        if curiosity_response:
+            CURIOSITY_BONUS = 5
+            if not sq.evaluation_json:
+                sq.evaluation_json = {"attempts": []}
+            curiosity_eval = {
+                "score": 35, "answer_type": "admitted_ignorance",
+                "final_feedback": "Great curiosity! Asking to learn shows strong growth mindset.",
+                "correct_answer": curiosity_response,
+            }
+            sq.evaluation_json = {
+                **sq.evaluation_json,
+                "attempts": sq.evaluation_json.get("attempts", []) + [
+                    {"answer": answer, "evaluation": curiosity_eval,
+                     "action": "next", "curiosity": True, "explanation": curiosity_response}
+                ],
+            }
+            sq.user_answer = sq.user_answer or answer
+            sq.score = 35 + CURIOSITY_BONUS
+            sq.ai_feedback = curiosity_eval["final_feedback"]
+            s.followup_count = 0
+            db.flush()
+            _update_total_score(s, db)
+
+            next_sq = _advance_pointer(s, db)
+            if not next_sq:
+                s.phase = "outro"; db.commit()
+                return {"phase": "outro", "action": "end", "prompt_type": "outro",
+                        "prompt_text": OUTRO_TEXT.get(language, OUTRO_TEXT["en"]),
+                        "evaluation": curiosity_eval, "explanation": curiosity_response,
+                        "transcript": transcript, "total_score": s.total_score}
+            nq_text = _get_sq_question_text(next_sq, db, language)
+            db.commit()
+            return {"phase": "bank", "action": "next", "prompt_type": "bank_question",
+                    "question_id": str(next_sq.question_id) if next_sq.question_id else None,
+                    "question_type": next_sq.question_type, "prompt_text": nq_text,
+                    "evaluation": curiosity_eval, "explanation": curiosity_response,
+                    "transcript": transcript, "total_score": s.total_score}
+
+    # ── Evaluate against the correct question (original or follow-up) ──
+    profile_context = (s.intro_evaluation_json or {}).get("profile_context")
     result = evaluate_and_decide(
-        answer=answer, question=q_text, role=s.role_name,
+        answer=answer, question=eval_question_text, role=s.role_name,
         language=language, question_type=q_type,
         body_language_desc=body_desc, tone_desc=tone_desc,
+        profile_context=profile_context,
     )
 
     evaluation = {
@@ -785,29 +907,35 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
     followup_q = (result.get("follow_up_question") or "").strip()
     answer_type = result.get("answer_type", "answered")
 
-    # Store attempt
+    # ── Store attempt with follow-up metadata ──
     if not sq.evaluation_json: sq.evaluation_json = {"attempts": []}
     attempt = {"answer": answer, "evaluation": evaluation, "action": action}
+    if is_followup_answer:
+        attempt["is_followup"] = True
+        attempt["followup_question"] = eval_question_text
+    if followup_q and action == "follow_up":
+        attempt["follow_up_question"] = followup_q
     if tone_data: attempt["tone"] = tone_data
     if body_data: attempt["body_language"] = body_data
-    sq.evaluation_json["attempts"].append(attempt)
+    sq.evaluation_json = {
+        **sq.evaluation_json,
+        "attempts": sq.evaluation_json.get("attempts", []) + [attempt],
+    }
 
     # ── Off-topic: re-ask with cap ──
     if answer_type == "off_topic":
         reask_count = len([
-            a for a in (sq.evaluation_json or {}).get("attempts", [])
+            a for a in sq.evaluation_json.get("attempts", [])
             if a.get("evaluation", {}).get("answer_type") == "off_topic"
         ])
 
         if reask_count >= MAX_REASK:
-            # Exhausted re-asks — score 0 and move on
             s.followup_count = 0
-            sq.user_answer = answer
+            sq.user_answer = sq.user_answer or answer
             sq.score = 0
             sq.ai_feedback = evaluation.get("final_feedback", "")
             db.flush()
             _update_total_score(s, db)
-
             next_sq = _advance_pointer(s, db)
             if not next_sq:
                 s.phase = "outro"; db.commit()
@@ -815,58 +943,56 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
                         "prompt_text": OUTRO_TEXT.get(language, OUTRO_TEXT["en"]),
                         "evaluation": evaluation, "transcript": transcript,
                         "total_score": s.total_score}
-
             nq_text = _get_sq_question_text(next_sq, db, language)
             db.commit()
             return {"phase": "bank", "action": "next", "prompt_type": "bank_question",
                     "question_id": str(next_sq.question_id) if next_sq.question_id else None,
-                    "question_type": next_sq.question_type,
-                    "prompt_text": nq_text, "evaluation": evaluation,
-                    "skip_reason": "reask_exhausted",
+                    "question_type": next_sq.question_type, "prompt_text": nq_text,
+                    "evaluation": evaluation, "skip_reason": "reask_exhausted",
                     "skip_message": REASK_EXHAUSTED_TEXT.get(language, REASK_EXHAUSTED_TEXT["en"]),
                     "transcript": transcript, "total_score": s.total_score}
 
-        # Still has re-ask attempts — remind them of the question
         reask_prompt = OFF_TOPIC_TEXT.get(language, OFF_TOPIC_TEXT["en"])
-        reask_prompt += f"\n\n{q_text}"
+        reask_prompt += f"\n\n{eval_question_text}"
         db.commit()
         return {"phase": "bank", "action": "re_ask", "prompt_type": "re_ask",
                 "prompt_text": reask_prompt,
                 "question_id": str(sq.question_id) if sq.question_id else None,
-                "question_type": q_type, "evaluation": evaluation, "transcript": transcript,
-                "reask_count": reask_count, "reask_max": MAX_REASK}
+                "question_type": q_type, "evaluation": evaluation,
+                "transcript": transcript, "reask_count": reask_count, "reask_max": MAX_REASK}
 
-    # ── Admitted ignorance / partial: credit + correct answer + next ──
+    # ── Admitted ignorance / partial ──
     if answer_type in ("admitted_ignorance", "partial"):
         s.followup_count = 0
-        sq.user_answer = answer
+        sq.user_answer = sq.user_answer or answer
         sq.score = int(evaluation.get("score", 25))
         sq.ai_feedback = evaluation.get("final_feedback", "")
+        correct = evaluation.get("correct_answer", "")
         db.flush()
         _update_total_score(s, db)
-
-        correct = evaluation.get("correct_answer", "")
         next_sq = _advance_pointer(s, db)
-
         if not next_sq:
             s.phase = "outro"; db.commit()
             return {"phase": "outro", "action": "end", "prompt_type": "outro",
                     "prompt_text": OUTRO_TEXT.get(language, OUTRO_TEXT["en"]),
                     "evaluation": evaluation, "correct_answer": correct,
                     "transcript": transcript, "total_score": s.total_score}
-
         nq_text = _get_sq_question_text(next_sq, db, language)
         db.commit()
         return {"phase": "bank", "action": "next", "prompt_type": "bank_question",
                 "question_id": str(next_sq.question_id) if next_sq.question_id else None,
-                "question_type": next_sq.question_type,
-                "prompt_text": nq_text, "evaluation": evaluation,
-                "correct_answer": correct, "transcript": transcript,
-                "total_score": s.total_score}
+                "question_type": next_sq.question_type, "prompt_text": nq_text,
+                "evaluation": evaluation, "correct_answer": correct,
+                "transcript": transcript, "total_score": s.total_score}
 
-    # ── Follow-up ──
+    # ── Follow-up: DO NOT set user_answer — keep sq pointer alive ──
     if action in ("follow_up", "clarify") and s.followup_count < followup_max and followup_q:
         s.followup_count += 1
+        # Save baseline score from first attempt but do NOT set user_answer
+        if sq.score is None:
+            sq.score = int(evaluation.get("score", 0))
+            sq.ai_feedback = evaluation.get("final_feedback", "")
+        db.flush()
         db.commit()
         return {"phase": "bank", "action": "follow_up", "prompt_type": "follow_up",
                 "prompt_text": followup_q,
@@ -877,8 +1003,14 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
 
     # ── Finalize + next ──
     s.followup_count = 0
-    sq.user_answer = answer
-    sq.score = int(evaluation.get("score", 0))
+    if sq.user_answer is None:
+        sq.user_answer = answer  # keep original answer from first attempt
+    # Combine scores: use the better of original vs follow-up
+    new_score = int(evaluation.get("score", 0))
+    if sq.score is not None and is_followup_answer:
+        sq.score = max(sq.score, (sq.score + new_score) // 2)
+    else:
+        sq.score = new_score
     sq.ai_feedback = evaluation.get("final_feedback", "")
     db.flush()
     _update_total_score(s, db)
@@ -895,6 +1027,6 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
     db.commit()
     return {"phase": "bank", "action": "next", "prompt_type": "bank_question",
             "question_id": str(next_sq.question_id) if next_sq.question_id else None,
-            "question_type": next_sq.question_type,
-            "prompt_text": nq_text, "evaluation": evaluation,
-            "transcript": transcript, "total_score": s.total_score}
+            "question_type": next_sq.question_type, "prompt_text": nq_text,
+            "evaluation": evaluation, "transcript": transcript,
+            "total_score": s.total_score}

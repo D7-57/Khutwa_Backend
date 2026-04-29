@@ -28,21 +28,27 @@ class BodyLanguageSummary:
     face_detected_pct: float = 0.0
 
     def to_dict(self) -> dict:
+        is_web = self.gesture_counts.get("web_fallback", 0) > self.frame_count * 0.5 if self.frame_count > 0 else False
         return {
             "eye_contact_pct": self.eye_contact_pct,
             "smile_pct": self.smile_pct,
             "frown_pct": self.frown_pct,
             "hands_visible_pct": self.hands_visible_pct,
             "dominant_gesture": self.dominant_gesture,
-            "gesture_counts": self.gesture_counts,
+            "gesture_counts": {k: v for k, v in self.gesture_counts.items() if k != "web_fallback"},
             "frame_count": self.frame_count,
             "face_detected_pct": self.face_detected_pct,
+            "is_web_fallback": is_web,
         }
 
     def describe_for_llm(self) -> str:
         """Compact description for injection into AI evaluation prompt."""
         if self.frame_count < 5:
             return ""
+
+        # If all signals are web_fallback, don't pretend we have real body language data
+        if self.gesture_counts.get("web_fallback", 0) > self.frame_count * 0.5:
+            return "Body language: web-based interview, camera active but no on-device analysis available."
 
         parts = []
 
@@ -56,15 +62,16 @@ class BodyLanguageSummary:
             parts.append(f"Moderate eye contact ({ec:.0%}).")
         elif ec > 0.30:
             parts.append(f"Below-average eye contact ({ec:.0%}).")
-        else:
+        elif ec > 0.01:
             parts.append(f"Poor eye contact ({ec:.0%}).")
+        # If ec == 0.0 and face_detected is high, it's web fallback — skip
 
         sm = self.smile_pct
         if sm > 0.45:
             parts.append(f"Warm, positive expression (smile {sm:.0%}).")
         elif sm > 0.20:
             parts.append(f"Mild positive expression (smile {sm:.0%}).")
-        else:
+        elif sm > 0.01:
             parts.append(f"Mostly neutral expression (smile {sm:.0%}).")
 
         hv = self.hands_visible_pct
@@ -72,13 +79,16 @@ class BodyLanguageSummary:
             parts.append(f"Active gesturing ({hv:.0%} hands visible).")
         elif hv > 0.20:
             parts.append(f"Some hand gestures ({hv:.0%}).")
-        else:
+        elif hv > 0.01:
             parts.append(f"Minimal gesturing ({hv:.0%}).")
 
         if self.gesture_counts:
-            sorted_g = sorted(self.gesture_counts.items(), key=lambda x: -x[1])[:3]
-            g_str = ", ".join(f"'{g}' (x{c})" for g, c in sorted_g)
-            parts.append(f"Gestures: {g_str}.")
+            # Filter out web_fallback from gesture display
+            real_gestures = {k: v for k, v in self.gesture_counts.items() if k != "web_fallback"}
+            if real_gestures:
+                sorted_g = sorted(real_gestures.items(), key=lambda x: -x[1])[:3]
+                g_str = ", ".join(f"'{g}' (x{c})" for g, c in sorted_g)
+                parts.append(f"Gestures: {g_str}.")
 
         return " ".join(parts)
 

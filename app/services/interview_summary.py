@@ -38,9 +38,21 @@ def build_interview_summary(db: Session, session_id: UUID) -> dict:
             q_text = ""
             q_source = "unknown"
 
-        last_attempt = {}
-        if sq.evaluation_json and sq.evaluation_json.get("attempts"):
-            last_attempt = sq.evaluation_json["attempts"][-1]
+        # Get all attempts
+        all_attempts = sq.evaluation_json.get("attempts", []) if sq.evaluation_json else []
+        last_attempt = all_attempts[-1] if all_attempts else {}
+
+        # Find the first real answer attempt (not a follow-up)
+        first_attempt = {}
+        for att in all_attempts:
+            if not att.get("is_followup") and att.get("evaluation"):
+                first_attempt = att
+                break
+        if not first_attempt:
+            first_attempt = last_attempt
+
+        # Use first attempt's evaluation for the main display
+        eval_data = first_attempt.get("evaluation", {})
 
         item = {
             "session_question_id": str(sq.id),
@@ -51,11 +63,10 @@ def build_interview_summary(db: Session, session_id: UUID) -> dict:
             "user_answer": sq.user_answer,
             "score": sq.score,
             "ai_feedback": sq.ai_feedback,
-            "attempt_count": len(sq.evaluation_json.get("attempts", [])) if sq.evaluation_json else 0,
+            "attempt_count": len(all_attempts),
         }
 
-        # Include answer_type and correct_answer from evaluation if present
-        eval_data = last_attempt.get("evaluation", {})
+        # Include evaluation details from first real attempt
         if eval_data.get("answer_type"):
             item["answer_type"] = eval_data["answer_type"]
         if eval_data.get("correct_answer"):
@@ -71,11 +82,30 @@ def build_interview_summary(db: Session, session_id: UUID) -> dict:
         if eval_data.get("final_feedback"):
             item["final_feedback"] = eval_data["final_feedback"]
 
-        # Tone + body data
+        # Tone + body data (from last attempt — most recent recording)
         if last_attempt.get("tone"):
             item["tone"] = last_attempt["tone"]
         if last_attempt.get("body_language"):
             item["body_language"] = last_attempt["body_language"]
+        if last_attempt.get("explanation"):
+            item["explanation"] = last_attempt["explanation"]
+
+        # ── Follow-up Q&A: collect all follow-up attempts for display ──
+        followups = []
+        for att in all_attempts:
+            if att.get("is_followup"):
+                followups.append({
+                    "question": att.get("followup_question", ""),
+                    "answer": att.get("answer", ""),
+                    "score": att.get("evaluation", {}).get("score"),
+                    "feedback": att.get("evaluation", {}).get("final_feedback", ""),
+                })
+            elif att.get("action") == "follow_up" and att.get("follow_up_question"):
+                # This attempt triggered a follow-up — note the follow-up question
+                if not followups or followups[-1].get("question") != att["follow_up_question"]:
+                    followups.append({"question": att["follow_up_question"], "answer": "", "score": None, "feedback": ""})
+        if followups:
+            item["followups"] = followups
 
         questions.append(item)
         if sq.user_answer is not None and sq.score is not None:
