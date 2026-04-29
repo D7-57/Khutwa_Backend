@@ -53,3 +53,17 @@ class CVDocumentListItemResponse(BaseModel):
     language: str
     created_at: datetime
     latest_evaluation: CVLatestEvaluationSummary | None
+
+
+class JobMatchRequest(BaseModel):
+    job_description: str
+    job_title: str | None = None
+
+
+class JobMatchResponse(BaseModel):
+    match_score: int
+    matched_keywords: dict
+    missing_keywords: dict
+    hard_requirement_flags: list[dict]
+    recommendation: str
+    radar_scores: dict

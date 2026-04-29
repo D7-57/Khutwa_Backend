@@ -32,6 +32,17 @@ SECTION_PROMPTS = {
         ),
         "instruction": "Improve this project description:",
     },
+    "achievement": {
+        "system": (
+            "You are an expert CV writer specializing in achievement-focused bullet points. "
+            "Rewrite the given achievement or bullet point using strong power verbs "
+            "(Led, Engineered, Architected, Spearheaded, Optimized, Streamlined, Delivered, etc.). "
+            "Follow the STAR format: Situation context → Action taken → Result achieved. "
+            "Quantify impact with numbers, percentages, or scale wherever possible. "
+            "Keep it to 1-2 lines. Do NOT invent metrics not implied by the original."
+        ),
+        "instruction": "Rewrite this achievement with stronger power verbs and quantified impact:",
+    },
 }
 
 

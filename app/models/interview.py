@@ -16,10 +16,11 @@ class InterviewSession(Base):
     language: Mapped[str] = mapped_column(Text, nullable=False, default="en")
 
     # ── session configuration ──
-    question_source: Mapped[str] = mapped_column(Text, nullable=False, default="bank")  # bank | ai | mix
+    question_source: Mapped[str] = mapped_column(Text, nullable=False, default="bank")
     company: Mapped[str | None] = mapped_column(Text, nullable=True)
-    tech_ratio: Mapped[int] = mapped_column(Integer, nullable=False, default=50)  # 0-100 (% technical)
+    tech_ratio: Mapped[int] = mapped_column(Integer, nullable=False, default=50)
     use_cv: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_rapid: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     # ── flow control ──
     phase: Mapped[str] = mapped_column(Text, nullable=False, default="intro")
@@ -55,13 +56,18 @@ class SessionQuestion(Base):
         nullable=False,
     )
 
-    question_id: Mapped[uuid.UUID] = mapped_column(
+    # ── CHANGED: nullable for CV-generated questions that aren't in the bank ──
+    question_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("questions.id"),
-        nullable=False,
+        nullable=True,  # was nullable=False
     )
 
-    # track the question type for per-question scoring context
+    # ── NEW: stores question text directly for CV-generated questions ──
+    # When question_id is set, this can be null (text comes from the Question row).
+    # When question_id is null (CV question), this holds the text.
+    question_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     question_type: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     user_answer: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -71,3 +77,14 @@ class SessionQuestion(Base):
     evaluation_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     session: Mapped["InterviewSession"] = relationship(back_populates="session_questions")
+
+    def get_question_text(self, db) -> str:
+        """Get question text — from this row if CV-generated, or from the Question table."""
+        if self.question_text:
+            return self.question_text
+        if self.question_id:
+            from app.models.question import Question
+            q = db.get(Question, self.question_id)
+            if q:
+                return q.question_text
+        return ""

@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.core.security import get_current_user_id
 from app.db.session import get_db
 from app.models.question import Question
+from app.services.question_review import validate_and_translate
 
 router = APIRouter(prefix="/questions/community", tags=["community-questions"])
 
@@ -25,19 +26,21 @@ class CommunitySubmitRequest(BaseModel):
     """Bulk submit: user picks role + optional company, then submits N questions."""
     role_name: str = Field(..., min_length=2)
     company: str | None = None
-    language: str = "en"
+    language: str = "en"  # language the user wrote in
     questions: list[CommunityQuestionItem] = Field(..., min_length=1, max_length=20)
 
 
 class CommunityQuestionOut(BaseModel):
     id: UUID
     role_name: str
-    question_text: str
+    question_text_en: str | None
+    question_text_ar: str | None
     question_type: str
     difficulty: int
     company: str | None
-    language: str
+    original_language: str
     status: str  # pending | approved | rejected
+    rejection_reason: str | None = None
     created_at: str | None
 
     class Config:
@@ -53,7 +56,7 @@ class CommunityQuestionUpdate(BaseModel):
 
 
 # ─────────────────────────────────────────
-#  SUBMIT (bulk)
+#  SUBMIT (bulk) — with AI validation + translation
 # ─────────────────────────────────────────
 
 
@@ -67,16 +70,27 @@ def submit_community_questions(
     created = []
 
     for item in body.questions:
+        # AI validates and translates
+        result = validate_and_translate(
+            question_text=item.question_text.strip(),
+            source_language=body.language,
+            role_name=body.role_name,
+        )
+
+        status = "pending" if result["approved"] else "rejected"
+
         q = Question(
             role_name=body.role_name,
-            question_text=item.question_text.strip(),
+            question_text_en=result["text_en"],
+            question_text_ar=result["text_ar"],
             question_type=item.question_type,
             difficulty=item.difficulty,
             source="community",
             submitted_by=uid,
-            status="pending",
+            status=status,
+            rejection_reason=result.get("rejection_reason"),
             company=body.company.strip() if body.company else None,
-            language=body.language,
+            original_language=body.language,
         )
         db.add(q)
         db.flush()
@@ -132,7 +146,17 @@ def update_my_community_question(
         )
 
     if body.question_text is not None:
-        q.question_text = body.question_text.strip()
+        # Re-validate and re-translate
+        result = validate_and_translate(
+            question_text=body.question_text.strip(),
+            source_language=q.original_language,
+            role_name=q.role_name,
+        )
+        q.question_text_en = result["text_en"]
+        q.question_text_ar = result["text_ar"]
+        if not result["approved"]:
+            q.status = "rejected"
+            q.rejection_reason = result.get("rejection_reason")
     if body.question_type is not None:
         q.question_type = body.question_type
     if body.difficulty is not None:
@@ -223,11 +247,13 @@ def _to_out(q: Question) -> CommunityQuestionOut:
     return CommunityQuestionOut(
         id=q.id,
         role_name=q.role_name,
-        question_text=q.question_text,
+        question_text_en=q.question_text_en,
+        question_text_ar=q.question_text_ar,
         question_type=q.question_type,
         difficulty=q.difficulty,
         company=q.company,
-        language=q.language,
+        original_language=q.original_language,
         status=q.status,
+        rejection_reason=q.rejection_reason,
         created_at=q.created_at.isoformat() if q.created_at else None,
     )

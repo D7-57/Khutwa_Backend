@@ -153,19 +153,36 @@ ul.bullets li {
 .link-sep::before {
   content: " | ";
 }
+
+.social-link {
+  color: #000;
+  text-decoration: none;
+  font-weight: bold;
+}
+
+.social-link:hover {
+  text-decoration: underline;
+}
 </style>
 </head>
 <body>
 
 <!-- HEADER -->
 <div class="header">
-  <div class="name">{{ contact.name }}</div>
+  <div class="name">{{ contact.name }}{% if job_target %} — {{ job_target }}{% endif %}</div>
   <div class="contact-line">
     {% if contact.location %}{{ contact.location }}{% endif %}
     {% if contact.phone %}{% if contact.location %} | {% endif %}{{ contact.phone }}{% endif %}
-    {% if contact.email %}{% if contact.phone or contact.location %} | {% endif %}{{ contact.email }}{% endif %}
-    {% for link in contact.links %}
-      {% if link %}<span class="link-sep"></span>{{ link }}{% endif %}
+    {% if contact.email %}{% if contact.phone or contact.location %} | {% endif %}<a href="mailto:{{ contact.email }}">{{ contact.email }}</a>{% endif %}
+    {% for link in contact.structured_links %}
+      <span class="link-sep"></span>
+      {% if link.type == 'linkedin' %}
+        <a href="{{ link.url }}" class="social-link">🔗 LinkedIn</a>
+      {% elif link.type == 'github' %}
+        <a href="{{ link.url }}" class="social-link">💻 GitHub</a>
+      {% else %}
+        <a href="{{ link.url }}">{{ link.label }}</a>
+      {% endif %}
     {% endfor %}
   </div>
 </div>

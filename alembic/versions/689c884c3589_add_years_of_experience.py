@@ -1,8 +1,8 @@
-"""add years_of_experience to profiles
+"""add years of experience
 
-Revision ID: a1b2c3d4e5f6
+Revision ID: 689c884c3589
 Revises: 922e856bc234
-Create Date: 2026-04-29 12:00:00.000000
+Create Date: 2026-04-29 22:29:30.601472
 
 """
 from typing import Sequence, Union
@@ -12,8 +12,8 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = "a1b2c3d4e5f6"
-down_revision: Union[str, None] = "922e856bc234"
+revision: str = '689c884c3589'
+down_revision: Union[str, None] = '922e856bc234'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
