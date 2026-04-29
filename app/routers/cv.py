@@ -1,6 +1,9 @@
+import html
+import json
 import uuid
 from fastapi import  Depends, HTTPException
 from fastapi import APIRouter, UploadFile, File
+from fastapi.responses import HTMLResponse
 from app.core.security import bearer_scheme
 from sqlalchemy.orm import Session
 from app.schemas.cv import (
@@ -338,3 +341,170 @@ def list_my_cv_documents(
         )
 
     return result
+
+
+# ---- Builder compatibility endpoints (legacy frontend support) ----
+
+def _render_builder_html(cv_data: dict, title: str = "CV Preview") -> str:
+    contact = cv_data.get("contactInfo", {}) if isinstance(cv_data, dict) else {}
+    summary = str(cv_data.get("summary", "")) if isinstance(cv_data, dict) else ""
+    name = str(contact.get("name", "")).strip() or "My CV"
+    email = str(contact.get("email", "")).strip()
+    phone = str(contact.get("phone", "")).strip()
+    location = str(contact.get("location", "")).strip()
+    meta = " | ".join([x for x in [email, phone, location] if x])
+
+    return f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>{html.escape(title)}</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; margin: 24px; color: #111; }}
+    h1 {{ margin: 0 0 6px 0; font-size: 28px; }}
+    h2 {{ margin: 18px 0 6px 0; font-size: 16px; border-bottom: 1px solid #ddd; padding-bottom: 4px; }}
+    .meta {{ color: #555; font-size: 12px; }}
+    .card {{ border: 1px solid #eee; border-radius: 8px; padding: 10px; margin: 8px 0; }}
+  </style>
+</head>
+<body>
+  <h1>{html.escape(name)}</h1>
+  <div class="meta">{html.escape(meta)}</div>
+  <h2>Summary</h2>
+  <div>{html.escape(summary)}</div>
+</body>
+</html>"""
+
+
+@router.get("/builder/templates")
+def builder_templates():
+    return [
+        {"id": "classic", "name": "Classic", "description": "Clean single-column, ATS-friendly"},
+        {"id": "modern", "name": "Modern", "description": "Contemporary with accent colors"},
+        {"id": "minimal", "name": "Minimal", "description": "Simple and elegant"},
+    ]
+
+
+@router.post("/builder")
+def builder_create(
+    payload: dict,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
+    title = str(payload.get("title") or "My CV")
+    language = str(payload.get("language") or "en")
+    cv_data = payload.get("cv_data") or {}
+    if not isinstance(cv_data, dict):
+        raise HTTPException(status_code=400, detail="cv_data must be an object")
+
+    raw_text = json.dumps(cv_data, ensure_ascii=False)
+    doc = CVDocument(
+        user_id=uuid.UUID(user_id),
+        raw_file_url=f"inline/generated/{uuid.uuid4().hex}.json",
+        filename=f"{title}.json",
+        mime_type="application/json",
+        file_size=len(raw_text.encode("utf-8")),
+        language=language,
+        raw_text=raw_text,
+        extracted_data=cv_data,
+        parser_version="builder-v1",
+        model_version="builder-v1",
+    )
+    db.add(doc)
+    db.commit()
+    db.refresh(doc)
+    return {
+        "cv_id": str(doc.id),
+        "title": title,
+        "language": language,
+        "cv_data": cv_data,
+    }
+
+
+@router.get("/builder/{cv_id}")
+def builder_get(
+    cv_id: str,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
+    try:
+        cv_uuid = uuid.UUID(cv_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid cv_id")
+    doc = db.query(CVDocument).filter(CVDocument.id == cv_uuid).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="CV not found")
+    if str(doc.user_id) != user_id:
+        raise HTTPException(status_code=403, detail="Not your CV")
+    return {
+        "cv_id": str(doc.id),
+        "title": (doc.filename or "My CV").replace(".json", ""),
+        "language": doc.language or "en",
+        "cv_data": doc.extracted_data or {},
+    }
+
+
+@router.patch("/builder/{cv_id}")
+def builder_save(
+    cv_id: str,
+    payload: dict,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
+    try:
+        cv_uuid = uuid.UUID(cv_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid cv_id")
+    doc = db.query(CVDocument).filter(CVDocument.id == cv_uuid).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="CV not found")
+    if str(doc.user_id) != user_id:
+        raise HTTPException(status_code=403, detail="Not your CV")
+
+    title = payload.get("title")
+    language = payload.get("language")
+    cv_data = payload.get("cv_data")
+    if title is not None:
+        doc.filename = f"{str(title)}.json"
+    if language is not None:
+        doc.language = str(language)
+    if cv_data is not None:
+        if not isinstance(cv_data, dict):
+            raise HTTPException(status_code=400, detail="cv_data must be an object")
+        doc.extracted_data = cv_data
+        doc.raw_text = json.dumps(cv_data, ensure_ascii=False)
+        doc.file_size = len((doc.raw_text or "").encode("utf-8"))
+    db.commit()
+    db.refresh(doc)
+    return {
+        "cv_id": str(doc.id),
+        "title": (doc.filename or "My CV").replace(".json", ""),
+        "language": doc.language or "en",
+        "cv_data": doc.extracted_data or {},
+    }
+
+
+@router.post("/builder/preview", response_class=HTMLResponse)
+def builder_preview(payload: dict):
+    cv_data = payload.get("cv_data") or {}
+    title = str(payload.get("title") or "CV Preview")
+    return _render_builder_html(cv_data=cv_data, title=title)
+
+
+@router.get("/builder/{cv_id}/preview", response_class=HTMLResponse)
+def builder_preview_saved(
+    cv_id: str,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
+    try:
+        cv_uuid = uuid.UUID(cv_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid cv_id")
+    doc = db.query(CVDocument).filter(CVDocument.id == cv_uuid).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="CV not found")
+    if str(doc.user_id) != user_id:
+        raise HTTPException(status_code=403, detail="Not your CV")
+    title = (doc.filename or "CV Preview").replace(".json", "")
+    return _render_builder_html(cv_data=doc.extracted_data or {}, title=title)
