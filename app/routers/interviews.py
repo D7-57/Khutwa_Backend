@@ -550,10 +550,131 @@ def list_my_interviews(user_id: str = Depends(get_current_user_id), db: Session 
     uid = UUID(user_id)
     sessions = db.query(InterviewSession).filter(InterviewSession.user_id == uid)\
         .order_by(InterviewSession.created_at.desc()).limit(50).all()
-    return [{"session_id": str(s.id), "role_name": s.role_name, "phase": s.phase,
-             "total_score": s.total_score, "question_source": s.question_source,
-             "company": s.company, "created_at": s.created_at.isoformat() if s.created_at else None}
-            for s in sessions]
+
+    results = []
+    for s in sessions:
+        config = s.intro_evaluation_json or {}
+        q_count = db.query(SessionQuestion).filter(SessionQuestion.session_id == s.id).count()
+        answered = db.query(SessionQuestion).filter(
+            SessionQuestion.session_id == s.id, SessionQuestion.user_answer.isnot(None)
+        ).count()
+
+        results.append({
+            "session_id": str(s.id),
+            "role_name": s.role_name,
+            "phase": s.phase,
+            "total_score": s.total_score,
+            "intro_score": s.intro_score,
+            "question_source": s.question_source,
+            "company": s.company,
+            "mode": config.get("mode", "text"),
+            "is_rapid": s.is_rapid,
+            "num_questions": q_count,
+            "num_answered": answered,
+            "created_at": s.created_at.isoformat() if s.created_at else None,
+        })
+    return results
+
+
+@router.get("/analytics")
+def get_interview_analytics(user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
+    """
+    Aggregated analytics across all interview sessions:
+    - Score trend over time
+    - Weak areas by question_type
+    - Per-role breakdown
+    - Improvement rate
+    """
+    uid = UUID(user_id)
+
+    sessions = db.query(InterviewSession).filter(
+        InterviewSession.user_id == uid,
+        InterviewSession.total_score.isnot(None),
+    ).order_by(InterviewSession.created_at.asc()).all()
+
+    if not sessions:
+        return {
+            "total_sessions": 0,
+            "score_trend": [],
+            "weak_areas": [],
+            "role_breakdown": {},
+            "avg_score": 0,
+            "best_score": 0,
+            "recent_avg": 0,
+            "improvement": 0,
+        }
+
+    # ── Score trend (per session, chronological) ──
+    score_trend = []
+    for s in sessions:
+        score_trend.append({
+            "session_id": str(s.id),
+            "score": s.total_score,
+            "role": s.role_name,
+            "date": s.created_at.isoformat() if s.created_at else None,
+        })
+
+    # ── Per question_type analytics ──
+    all_sqs = (
+        db.query(SessionQuestion)
+        .join(InterviewSession, InterviewSession.id == SessionQuestion.session_id)
+        .filter(
+            InterviewSession.user_id == uid,
+            SessionQuestion.score.isnot(None),
+        ).all()
+    )
+
+    type_scores: dict[str, list[int]] = {}
+    for sq in all_sqs:
+        qt = sq.question_type or "general"
+        type_scores.setdefault(qt, []).append(sq.score or 0)
+
+    weak_areas = []
+    for qt, scores in sorted(type_scores.items(), key=lambda x: sum(x[1]) / len(x[1]) if x[1] else 0):
+        avg = int(sum(scores) / len(scores)) if scores else 0
+        weak_areas.append({
+            "question_type": qt,
+            "avg_score": avg,
+            "count": len(scores),
+        })
+
+    # ── Per-role breakdown ──
+    role_scores: dict[str, list[int]] = {}
+    for s in sessions:
+        role_scores.setdefault(s.role_name, []).append(s.total_score or 0)
+
+    role_breakdown = {}
+    for role, scores in role_scores.items():
+        role_breakdown[role] = {
+            "sessions": len(scores),
+            "avg_score": int(sum(scores) / len(scores)) if scores else 0,
+            "best_score": max(scores) if scores else 0,
+        }
+
+    # ── Overall stats ──
+    all_scores = [s.total_score for s in sessions if s.total_score is not None]
+    avg_score = int(sum(all_scores) / len(all_scores)) if all_scores else 0
+    best_score = max(all_scores) if all_scores else 0
+
+    # Recent average (last 5 sessions)
+    recent = all_scores[-5:] if len(all_scores) >= 5 else all_scores
+    recent_avg = int(sum(recent) / len(recent)) if recent else 0
+
+    # Improvement: recent avg vs first 5 sessions avg
+    early = all_scores[:5] if len(all_scores) >= 5 else all_scores
+    early_avg = int(sum(early) / len(early)) if early else 0
+    improvement = recent_avg - early_avg
+
+    return {
+        "total_sessions": len(sessions),
+        "score_trend": score_trend,
+        "weak_areas": weak_areas,
+        "role_breakdown": role_breakdown,
+        "avg_score": avg_score,
+        "best_score": best_score,
+        "recent_avg": recent_avg,
+        "improvement": improvement,
+    }
 
 
 # ─────────────────────────────────────────
