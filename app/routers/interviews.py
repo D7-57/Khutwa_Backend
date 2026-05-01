@@ -677,6 +677,96 @@ def get_interview_analytics(user_id: str = Depends(get_current_user_id), db: Ses
     }
 
 
+@router.post("/{session_id}/retake")
+def retake_interview(
+    session_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """
+    Reset an existing interview session — clears all scores and answers
+    so the user can retry the same questions with a fresh start.
+    """
+    uid = UUID(user_id)
+    s = db.get(InterviewSession, UUID(session_id))
+    if not s or str(s.user_id) != user_id:
+        raise HTTPException(404, detail="Session not found")
+
+    language = _get_language(db, uid)
+    profile = db.get(Profile, uid)
+
+    # ── Reset all session question data ──
+    sqs = (
+        db.query(SessionQuestion)
+        .filter(SessionQuestion.session_id == s.id)
+        .order_by(SessionQuestion.id)
+        .all()
+    )
+
+    first_sq_id = None
+    all_question_data = []
+    for sq in sqs:
+        # Clear answers, scores, feedback, evaluation data
+        sq.user_answer = None
+        sq.score = None
+        sq.ai_feedback = None
+        sq.evaluation_json = None
+
+        if first_sq_id is None:
+            first_sq_id = sq.id
+
+        q_text = sq.question_text or ""
+        if not q_text and sq.question_id:
+            from app.models.question import Question
+            q = db.get(Question, sq.question_id)
+            if q:
+                q_text = q.get_text(language)
+
+        all_question_data.append({
+            "session_question_id": str(sq.id),
+            "question_id": str(sq.question_id) if sq.question_id else None,
+            "question_text": q_text,
+            "question_type": sq.question_type,
+        })
+
+    # ── Reset session-level data ──
+    s.phase = "intro"
+    s.current_index = 0
+    s.current_sq_id = first_sq_id
+    s.followup_count = 0
+    s.total_score = None
+    s.intro_score = None
+    s.intro_feedback = None
+
+    # Keep profile_context and mode from old config, clear intro evaluation
+    old_config = s.intro_evaluation_json or {}
+    s.intro_evaluation_json = {
+        "followup_max": old_config.get("followup_max", 1),
+        "mode": old_config.get("mode", "text"),
+        "profile_context": old_config.get("profile_context", {}),
+    }
+
+    config = s.intro_evaluation_json
+    mode = config.get("mode", "text")
+
+    if mode == "video":
+        create_tracker(str(s.id))
+
+    db.commit()
+
+    user_name = profile.first_name if profile and profile.first_name else None
+    intro_text = pick_intro(language, user_name)
+
+    return {
+        "session_id": str(s.id),
+        "phase": "intro",
+        "prompt_text": intro_text,
+        "mode": mode,
+        "role_name": s.role_name,
+        "questions": all_question_data,
+    }
+
+
 # ─────────────────────────────────────────
 #  RAPID-FIRE BATCH SUBMIT
 # ─────────────────────────────────────────

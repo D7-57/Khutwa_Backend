@@ -123,19 +123,22 @@ def build_profile_prefill(structured_cv: dict[str, Any]) -> dict:
             for l in langs[:8]
         ]
 
-    # Projects
+    # Projects — include role and bullet points for CV-quality entries
     if projects:
         prefill["projects"] = [
             {
                 "name": p.get("name", ""),
+                "role": p.get("role"),           # role the person played on the project
                 "description": p.get("description"),
                 "tech": p.get("tech", []),
+                # bullets: the LLM may return a list of responsibilities
+                "bullets": p.get("bullets", []) or p.get("responsibilities", []),
             }
             for p in projects[:8]
             if p.get("name")
         ]
 
-    # Experiences
+    # Experiences — include description/bullets for richer CV output
     if experience:
         prefill["experiences"] = [
             {
@@ -144,6 +147,8 @@ def build_profile_prefill(structured_cv: dict[str, Any]) -> dict:
                 "location": e.get("location"),
                 "start_date": e.get("start_date"),
                 "end_date": e.get("end_date"),
+                "description": e.get("description"),
+                "bullets": e.get("bullets", []) or e.get("responsibilities", []),
             }
             for e in experience[:8]
             if e.get("role") or e.get("company")

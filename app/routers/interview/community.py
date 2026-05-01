@@ -197,6 +197,21 @@ def delete_my_community_question(
 # ─────────────────────────────────────────
 
 
+@router.get("/roles", response_model=list[str])
+def list_question_roles(
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """Return all distinct role names from the question bank, for autocomplete."""
+    rows = (
+        db.query(Question.role_name)
+        .filter(Question.status == "approved")
+        .distinct()
+        .all()
+    )
+    return sorted(set(r[0] for r in rows if r[0]))
+
+
 @router.get("/browse", response_model=list[CommunityQuestionOut])
 def browse_community_questions(
     role_name: str | None = None,
