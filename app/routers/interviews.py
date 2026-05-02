@@ -484,9 +484,18 @@ async def turn(
         return {"phase": "finished", "prompt_type": "outro",
                 "prompt_text": OUTRO_TEXT.get(language, OUTRO_TEXT["en"]), "transcript": transcript}
 
-    return _handle_bank(s, answer, transcript, language, followup_max, db,
+    response = _handle_bank(s, answer, transcript, language, followup_max, db,
                         tone_desc=tone_desc, tone_data=tone_data,
                         body_desc=body_desc, body_data=body_data)
+
+    # Inject tone + body_language into the response so the frontend has it
+    # without needing to call /summary (which can fail over flaky tunnels).
+    if tone_data and isinstance(response, dict):
+        response["tone"] = tone_data
+    if body_data and isinstance(response, dict):
+        response["body_language"] = body_data
+
+    return response
 
 
 # ─────────────────────────────────────────
@@ -526,16 +535,27 @@ async def transcribe_only(
 
 @router.websocket("/{session_id}/video")
 async def video_ws(websocket: WebSocket, session_id: str):
+    """
+    Receives base64-encoded JPEG frames from the client.
+    Server runs MediaPipe to compute eye contact, smile, gestures, etc.
+    Echoes live signals back so the UI can render bars/badges.
+    """
     await websocket.accept()
     tracker = get_tracker(session_id) or create_tracker(session_id)
     try:
         while True:
             msg = json.loads(await websocket.receive_text())
-            if msg.get("reset"): tracker.reset(); continue
-            tracker.record_frame(
-                eye_contact=float(msg.get("eye_contact", 0)), smile=float(msg.get("smile", 0)),
-                frown=float(msg.get("frown", 0)), hands_visible=bool(msg.get("hands_visible", False)),
-                face_detected=bool(msg.get("face_detected", False)), gesture=msg.get("gesture", "none"))
+            if msg.get("reset"):
+                tracker.reset()
+                continue
+            jpeg_b64 = msg.get("frame", "")
+            if not jpeg_b64:
+                continue
+            live = tracker.process_frame(jpeg_b64)
+            try:
+                await websocket.send_text(json.dumps(live))
+            except Exception:
+                break
     except: pass
 
 @router.get("/{session_id}/summary")
@@ -730,7 +750,7 @@ def retake_interview(
         })
 
     # ── Reset session-level data ──
-    s.phase = "intro"
+    s.phase = "rapid" if s.is_rapid else "intro"
     s.current_index = 0
     s.current_sq_id = first_sq_id
     s.followup_count = 0

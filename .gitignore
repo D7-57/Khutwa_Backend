@@ -17,3 +17,6 @@ env/
 *.sqlite3
 
 question.mp3
+
+# MediaPipe model files (downloaded by download_models.py)
+app/models/*.task
