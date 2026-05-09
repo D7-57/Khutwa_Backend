@@ -31,6 +31,14 @@ def _get_language(db: Session, user_id: UUID) -> str:
     return "en"
 
 
+def _resolve_requested_language(*values: str | None) -> str | None:
+    for raw in values:
+        v = (raw or "").strip().lower()
+        if v in ("ar", "en"):
+            return v
+    return None
+
+
 def _question_text(q: Question, language: str) -> str:
     if language == "ar":
         return (q.question_text_ar or q.question_text_en or "").strip()
@@ -42,11 +50,19 @@ def start_interview(
     role_name: str,
     num_questions: int = 5,
     followup_max: int = 1,
+    language: str | None = None,
+    interview_language: str | None = None,
+    lang: str | None = None,
     user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
     uid = UUID(user_id)
-    language = _get_language(db, uid)
+    requested_language = _resolve_requested_language(
+        interview_language,
+        language,
+        lang,
+    )
+    language = requested_language or _get_language(db, uid)
 
     requested = (role_name or "").strip()
     norm = requested.lower().replace(" ", "_")
@@ -112,6 +128,7 @@ def start_interview(
         "phase": session.phase,
         "prompt_type": "intro",
         "prompt_text": intro_text,
+        "language": language,
     }
 
 @router.get(
