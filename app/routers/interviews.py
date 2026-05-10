@@ -1,23 +1,52 @@
 """
-Interviews router — v2
+Interviews router — v3
 
-Question mix:
-  Count | General (bank) | CV (AI) | Tech+Behavioral (bank)
-  3     | 1              | 1       | 1   (no CV → 1 general, 2 bank)
-  5     | 1              | 2       | 2   (no CV → 1 general, 4 bank)
-  7     | 2              | 2       | 3   (no CV → 2 general, 5 bank)
-  10    | 3              | 3       | 4   (no CV → 3 general, 7 bank)
+WHAT'S NEW vs v2:
+  • practice_mode (free | focused)
+      'focused' biases question selection toward topics the user has previously
+      scored < 55 on for the same role. The evaluator also gets a focus_mode
+      flag so its feedback frames "you were weak on this — here's how to fix it"
+      instead of generic praise.
 
-CV questions are AI-generated and stored in session_questions.question_text
-(NOT in the questions table). question_id is null for these.
+  • Dynamic difficulty from profile.years_of_experience
+      The string column ("0", "<1", "1", "2", "3+") is read directly and
+      passed to the evaluator as `experience_band`. Bank selection ALSO uses
+      this band to filter question difficulty:
+          band  difficulty range
+           0    1..3
+          <1    1..3
+           1    1..4
+           2    2..4
+          3+    2..5
+
+  • Finalize-early endpoint (POST /interviews/{id}/finalize)
+      Used by the "End & View Scores" button. Marks remaining unanswered
+      questions as skipped (score=0), recomputes total_score, sets
+      phase='finished' and finished_early=True, finished_at=now().
+      Without this, sessions ended via the UI button stayed phase='bank'
+      forever and showed 'in progress' in the history list.
+
+  • Resume endpoint (GET /interviews/{id}/resume)
+      Returns enough info for the Flutter app to re-enter an in-progress
+      session at the right place: current question text, phase, mode,
+      total_score, remaining count.
+
+  • Per-question relevance endpoint
+      POST /interviews/{session_id}/questions/{question_id}/relevance
+      The Flutter client already calls this (see InterviewRepository
+      .postQuestionRelevance). Now it actually exists.
+
+  • Summary now always includes correct_answer + tip per question.
 """
 
 import random
 import json
+from datetime import datetime, timezone
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from io import BytesIO
 from fastapi.responses import StreamingResponse
 
@@ -27,6 +56,7 @@ from app.models.question import Question
 from app.models.profile import Profile
 from app.models.cv import CVDocument
 from app.models.interview import InterviewSession, SessionQuestion
+from app.models.question_vote import QuestionRelevanceFeedback
 from app.services.ai_interview import (
     evaluate_intro,
     evaluate_and_decide,
@@ -44,7 +74,6 @@ from app.services.interview.tone_analyzer import analyze_tone
 
 router = APIRouter(prefix="/interviews", tags=["interviews"])
 
-# ─── Question mix lookup ─────────────────────────────────────────────────
 # (general_from_bank, cv_from_ai, tech_behavioral_from_bank)
 QUESTION_MIX = {
     3:  (1, 1, 1),
@@ -53,8 +82,16 @@ QUESTION_MIX = {
     10: (3, 3, 4),
 }
 
-MAX_REASK = 2  # after this many re-asks, auto-score 0 and move on
-MAX_CLARIFY = 2  # max clarification questions per interview question
+MAX_REASK = 2
+MAX_CLARIFY = 2
+
+# A user is considered to have a "weak" question if they previously scored
+# below this threshold on it for the same role.
+WEAK_THRESHOLD = 55
+
+# Minimum number of finished sessions before focused practice is unlocked.
+# Below this, we don't have enough signal.
+MIN_SESSIONS_FOR_FOCUSED = 3
 
 REASK_TEXT = {
     "ar": "لم أسمع إجابتك. ممكن تعيد الإجابة؟",
@@ -73,6 +110,16 @@ REASK_EXHAUSTED_TEXT = {
     "en": "Let's move on to the next question.",
 }
 
+# Difficulty bands per experience level — used for dynamic difficulty
+# in question selection.
+DIFFICULTY_RANGES: dict[str, tuple[int, int]] = {
+    "0":  (1, 3),
+    "<1": (1, 3),
+    "1":  (1, 4),
+    "2":  (2, 4),
+    "3+": (2, 5),
+}
+
 
 # ─────────────────────────────────────────
 #  START
@@ -82,12 +129,14 @@ class StartInterviewRequest(BaseModel):
     role_name: str
     num_questions: int = 5
     followup_max: int = 1
-    question_source: str = "bank"  # bank | ai | mix (legacy, still accepted)
+    question_source: str = "bank"
     tech_ratio: int = 50
     company: str | None = None
     use_cv: bool = False
-    mode: str = "text"  # text | audio | video
+    mode: str = "text"
     is_rapid: bool = False
+    # NEW: 'free' | 'focused'
+    practice_mode: str = "free"
 
 
 @router.post("/start")
@@ -101,33 +150,72 @@ def start_interview(
     profile = db.get(Profile, uid)
     user_name = profile.first_name if profile and profile.first_name else None
 
-    # ── Extract profile context for personalization ──
-    profile_context = {}
+    practice_mode = (body.practice_mode or "free").lower()
+    if practice_mode not in ("free", "focused"):
+        practice_mode = "free"
+
+    # Focused practice gating: require enough finished sessions of signal.
+    if practice_mode == "focused":
+        finished_count = (
+            db.query(InterviewSession)
+            .filter(
+                InterviewSession.user_id == uid,
+                # Both 'finished' and 'outro' are terminal in this codebase —
+                # natural completion routes through 'outro', finalize-early
+                # and rapid-submit go to 'finished'. Count both.
+                InterviewSession.phase.in_(["finished", "outro"]),
+            )
+            .count()
+        )
+        if finished_count < MIN_SESSIONS_FOR_FOCUSED:
+            # Quietly downgrade rather than 400 — the UI should also block
+            # this, but we don't want a hard failure if the user slipped through.
+            practice_mode = "free"
+
+    # ── Profile context ──
+    profile_context: dict = {}
     if profile:
         status = (profile.current_status or "").strip().lower()
         if status:
-            profile_context["status"] = status  # student | graduate | employed
+            profile_context["status"] = status
 
-        # Compute years of experience from experiences JSON
-        experiences = profile.experiences or []
-        if isinstance(experiences, list) and experiences:
-            profile_context["years_of_experience"] = len(experiences)
-            profile_context["has_experience"] = True
+        # Use the dedicated string band first; fall back to legacy len(experiences).
+        band = (profile.years_of_experience or "").strip()
+        if band in DIFFICULTY_RANGES:
+            profile_context["experience_band"] = band
+            profile_context["has_experience"] = band not in ("0", "<1")
+            # Numeric proxy for older code paths
+            profile_context["years_of_experience"] = (
+                0 if band in ("0", "<1") else
+                3 if band == "3+" else int(band)
+            )
         else:
-            profile_context["years_of_experience"] = 0
-            profile_context["has_experience"] = False
+            experiences = profile.experiences or []
+            if isinstance(experiences, list) and experiences:
+                profile_context["years_of_experience"] = len(experiences)
+                profile_context["has_experience"] = True
+            else:
+                profile_context["years_of_experience"] = 0
+                profile_context["has_experience"] = False
 
         if profile.major:
             profile_context["major"] = profile.major
         if profile.university:
             profile_context["university"] = profile.university
 
+    if practice_mode == "focused":
+        profile_context["focus_mode"] = True
+
     # ── Build question mix ──
+    weak_question_ids = _get_weak_question_ids(db, uid, body.role_name)
+
     all_questions = _build_question_mix(
         db=db,
         body=body,
         language=language,
         user_id=uid,
+        weak_question_ids=weak_question_ids if practice_mode == "focused" else set(),
+        experience_band=profile_context.get("experience_band"),
     )
 
     if not all_questions:
@@ -144,10 +232,16 @@ def start_interview(
         tech_ratio=body.tech_ratio,
         use_cv=body.use_cv,
         is_rapid=is_rapid,
+        practice_mode=practice_mode,
         phase="rapid" if is_rapid else "intro",
         current_index=0,
         followup_count=0,
-        intro_evaluation_json={"followup_max": body.followup_max, "mode": body.mode, "profile_context": profile_context},
+        intro_evaluation_json={
+            "followup_max": body.followup_max,
+            "mode": body.mode,
+            "profile_context": profile_context,
+            "practice_mode": practice_mode,
+        },
     )
     db.add(session)
     db.flush()
@@ -155,15 +249,14 @@ def start_interview(
     if body.mode == "video":
         create_tracker(str(session.id))
 
-    # ── Create session questions ──
     first_sq_id = None
     all_question_data = []
 
     for i, qdata in enumerate(all_questions):
         sq = SessionQuestion(
             session_id=session.id,
-            question_id=qdata.get("question_id"),       # None for CV questions
-            question_text=qdata.get("question_text"),     # set for CV questions
+            question_id=qdata.get("question_id"),
+            question_text=qdata.get("question_text"),
             question_type=qdata["question_type"],
         )
         db.add(sq)
@@ -190,7 +283,7 @@ def start_interview(
             "prompt_type": "rapid",
             "prompt_text": pick_intro(language, user_name),
             "questions": all_question_data,
-            "config": _config_dict(body, len(all_questions)),
+            "config": _config_dict(body, len(all_questions), practice_mode),
         }
 
     return {
@@ -198,11 +291,11 @@ def start_interview(
         "phase": "intro",
         "prompt_type": "intro",
         "prompt_text": pick_intro(language, user_name),
-        "config": _config_dict(body, len(all_questions)),
+        "config": _config_dict(body, len(all_questions), practice_mode),
     }
 
 
-def _config_dict(body: StartInterviewRequest, count: int) -> dict:
+def _config_dict(body: StartInterviewRequest, count: int, practice_mode: str) -> dict:
     return {
         "question_source": body.question_source,
         "tech_ratio": body.tech_ratio,
@@ -211,7 +304,58 @@ def _config_dict(body: StartInterviewRequest, count: int) -> dict:
         "mode": body.mode,
         "is_rapid": body.is_rapid,
         "num_questions": count,
+        "practice_mode": practice_mode,
     }
+
+
+# ─────────────────────────────────────────
+#  WEAK-AREA HELPER
+# ─────────────────────────────────────────
+
+def _get_weak_question_ids(
+    db: Session, user_id: UUID, role_name: str
+) -> set[UUID]:
+    """
+    Question IDs the user is currently weak on for this role.
+
+    "Currently weak" = the user's MOST RECENT attempt at the question scored
+    below WEAK_THRESHOLD. If they later re-encountered the question and did
+    well, it falls out of the weak set — focused practice should chase what
+    you're *still* bad at, not follow you around forever.
+
+    SessionQuestion has no timestamp of its own, so we use the parent
+    InterviewSession.created_at as the recency proxy. (Within one session
+    it's also a stable tiebreaker: SessionQuestion.id, which is a uuid v4,
+    isn't time-ordered, but two attempts of the same question in one session
+    isn't a realistic case.)
+    """
+    rn = func.row_number().over(
+        partition_by=SessionQuestion.question_id,
+        order_by=InterviewSession.created_at.desc(),
+    ).label("rn")
+
+    inner = (
+        db.query(
+            SessionQuestion.question_id.label("qid"),
+            SessionQuestion.score.label("score"),
+            rn,
+        )
+        .join(InterviewSession, InterviewSession.id == SessionQuestion.session_id)
+        .filter(
+            InterviewSession.user_id == user_id,
+            InterviewSession.role_name == role_name,
+            SessionQuestion.question_id.isnot(None),
+            SessionQuestion.score.isnot(None),
+        )
+        .subquery()
+    )
+
+    rows = (
+        db.query(inner.c.qid)
+        .filter(inner.c.rn == 1, inner.c.score < WEAK_THRESHOLD)
+        .all()
+    )
+    return {r[0] for r in rows if r[0]}
 
 
 # ─────────────────────────────────────────
@@ -223,28 +367,17 @@ def _build_question_mix(
     body: StartInterviewRequest,
     language: str,
     user_id: UUID,
+    weak_question_ids: set[UUID] | None = None,
+    experience_band: str | None = None,
 ) -> list[dict]:
-    """
-    Builds the final ordered list of questions for the session.
-
-    Each item: {
-        "question_id": UUID | None,    # None for CV-generated
-        "question_text": str | None,    # set for CV-generated (stored in session_questions)
-        "display_text": str,            # the text to show/speak
-        "question_type": str,
-        "source": "bank_general" | "bank_tech" | "cv_generated",
-    }
-    """
     num = body.num_questions
     mix = QUESTION_MIX.get(num)
     if not mix:
-        # Fallback: nearest defined count
         nearest = min(QUESTION_MIX.keys(), key=lambda k: abs(k - num))
         mix = QUESTION_MIX[nearest]
 
     n_general, n_cv, n_bank = mix
 
-    # If no CV, redistribute CV slots to bank
     if not body.use_cv:
         n_bank += n_cv
         n_cv = 0
@@ -255,9 +388,11 @@ def _build_question_mix(
         question_type="general",
         count=n_general,
         company=body.company,
+        weak_question_ids=weak_question_ids,
+        experience_band=experience_band,
     )
 
-    # ── 2. CV-based questions (AI-generated, not saved to Question table) ──
+    # ── 2. CV-based questions ──
     cv_qs = []
     if n_cv > 0:
         cv_summary = _get_cv_summary(db, user_id)
@@ -272,20 +407,18 @@ def _build_question_mix(
             for cq in raw_cv:
                 cv_qs.append({
                     "question_id": None,
-                    "question_text": cq["question_text"],  # stored in SessionQuestion
+                    "question_text": cq["question_text"],
                     "display_text": cq["question_text"],
                     "question_type": cq.get("question_type", "technical"),
                     "source": "cv_generated",
                 })
-        # If CV generation failed or no CV data, give those slots to bank
         if len(cv_qs) < n_cv:
             n_bank += (n_cv - len(cv_qs))
 
-    # ── 3. Tech/behavioral from bank (ratio applies here) ──
+    # ── 3. Tech/behavioral from bank ──
     num_tech = round(n_bank * body.tech_ratio / 100)
     num_soft = n_bank - num_tech
 
-    # Exclude IDs already selected for general
     exclude_ids = {q["question_id"] for q in general_qs if q["question_id"]}
 
     tech_qs = _select_from_bank(
@@ -294,27 +427,28 @@ def _build_question_mix(
         count=num_tech,
         company=body.company,
         exclude_ids=exclude_ids,
+        weak_question_ids=weak_question_ids,
+        experience_band=experience_band,
     )
 
     exclude_ids.update(q["question_id"] for q in tech_qs if q["question_id"])
 
     soft_qs = _select_from_bank(
         db, body.role_name, language, user_id,
-        question_type=None,  # soft, behavioral, or general (non-technical)
+        question_type=None,
         count=num_soft,
         company=body.company,
         exclude_ids=exclude_ids,
         soft_types=True,
+        weak_question_ids=weak_question_ids,
+        experience_band=experience_band,
     )
 
-    # ── Assemble: general first, then interleave CV + bank ──
     bank_qs = tech_qs + soft_qs
     random.shuffle(bank_qs)
     random.shuffle(cv_qs)
 
-    result = list(general_qs)  # general at the start
-
-    # Interleave CV and bank questions
+    result = list(general_qs)
     ci, bi = 0, 0
     while ci < len(cv_qs) or bi < len(bank_qs):
         if ci < len(cv_qs):
@@ -335,16 +469,15 @@ def _select_from_bank(
     company: str | None = None,
     exclude_ids: set[UUID] | None = None,
     soft_types: bool = False,
+    weak_question_ids: set[UUID] | None = None,
+    experience_band: str | None = None,
 ) -> list[dict]:
-    """Select questions from the bank. Returns list of question dicts."""
     if count <= 0:
         return []
 
-    # Map legacy "soft" to "behavioral"
     if question_type == "soft":
         question_type = "behavioral"
 
-    # IDs user has already seen
     seen_subq = (
         db.query(SessionQuestion.question_id)
         .join(InterviewSession, InterviewSession.id == SessionQuestion.session_id)
@@ -354,15 +487,12 @@ def _select_from_bank(
     if exclude_ids:
         seen_ids.update(exclude_ids)
 
-    # Pull from both the specific role AND the "general" pool
     if question_type == "general":
-        # General questions live under role_name="general"
         all_qs = db.query(Question).filter(
             Question.role_name == "general",
             Question.status == "approved",
         ).all()
     else:
-        # Role-specific questions
         all_qs = db.query(Question).filter(
             Question.role_name == role_name,
             Question.status == "approved",
@@ -371,43 +501,76 @@ def _select_from_bank(
     if not all_qs:
         return []
 
-    # Type filter
     if question_type:
         pool = [x for x in all_qs if x.question_type == question_type]
     elif soft_types:
-        # "soft_types" means non-technical: behavioral or general
         pool = [x for x in all_qs if x.question_type in ("behavioral", "general")]
     else:
         pool = all_qs
 
+    # ── DYNAMIC DIFFICULTY ──
+    # Filter by difficulty range matching the candidate's experience band.
+    # If the strict range gives us nothing, fall back to all difficulties so
+    # we don't produce an empty session.
+    if experience_band and experience_band in DIFFICULTY_RANGES:
+        lo, hi = DIFFICULTY_RANGES[experience_band]
+        difficulty_filtered = [
+            x for x in pool
+            if (x.difficulty or 1) >= lo and (x.difficulty or 1) <= hi
+        ]
+        if difficulty_filtered:
+            pool = difficulty_filtered
+
     # Prefer unseen
     unseen = [x for x in pool if x.id not in seen_ids]
+    fallback_seen = False
     if not unseen:
         unseen = pool  # allow repeats if exhausted
+        fallback_seen = True
 
-    # Company priority
-    company_qs = []
-    other_qs = []
-    for x in unseen:
-        if company and x.company and x.company.lower() == company.lower():
-            company_qs.append(x)
-        else:
-            other_qs.append(x)
+    # ── FOCUSED PRACTICE: float weak questions to the top ──
+    # When focused mode is on, the user has already seen these — but here
+    # repetition is the point. Build the candidate set from the ALL pool
+    # (including seen) for the weak ones.
+    weak_pool: list = []
+    normal_pool: list = unseen
+    if weak_question_ids:
+        weak_pool = [x for x in pool if x.id in weak_question_ids]
+        # Don't double-count: remove weak ones from normal_pool
+        weak_set = {x.id for x in weak_pool}
+        normal_pool = [x for x in unseen if x.id not in weak_set]
 
-    random.shuffle(company_qs)
-    random.shuffle(other_qs)
+    # ── Company priority within each pool ──
+    def _split_company(items):
+        comp, other = [], []
+        for x in items:
+            if company and x.company and x.company.lower() == company.lower():
+                comp.append(x)
+            else:
+                other.append(x)
+        random.shuffle(comp); random.shuffle(other)
+        return comp + other
+
+    weak_pool = _split_company(weak_pool)
+    normal_pool = _split_company(normal_pool)
+
+    # Take from weak first, then fill from normal.
+    candidate = weak_pool + normal_pool
 
     selected = []
-    for x in company_qs + other_qs:
+    excl = exclude_ids or set()
+    for x in candidate:
         if len(selected) >= count:
             break
-        if x.id not in (exclude_ids or set()):
-            selected.append(x)
+        if x.id in excl:
+            continue
+        selected.append(x)
+        excl.add(x.id)
 
     return [
         {
             "question_id": q.id,
-            "question_text": None,  # text comes from Question table via FK
+            "question_text": None,
             "display_text": q.get_text(language),
             "question_type": q.question_type,
             "source": f"bank_{q.question_type}",
@@ -436,7 +599,6 @@ async def turn(
     language = s.language or "en"
     mode = (s.intro_evaluation_json or {}).get("mode", "text")
 
-    # Transcribe audio
     transcript = None
     if audio is not None:
         audio_bytes = await audio.read()
@@ -445,7 +607,6 @@ async def turn(
     else:
         answer = (answer_text or "").strip()
 
-    # Empty → re-ask
     if not answer:
         return {
             "phase": s.phase,
@@ -455,7 +616,6 @@ async def turn(
             "transcript": transcript,
         }
 
-    # Tone + body language
     tone_desc, tone_data = "", None
     if mode in ("audio", "video") and recording_seconds > 1:
         tone_result = analyze_tone(answer, recording_seconds)
@@ -480,6 +640,8 @@ async def turn(
     if s.phase in ("outro", "finished"):
         if mode == "video": remove_tracker(session_id)
         s.phase = "finished"
+        if not s.finished_at:
+            s.finished_at = datetime.now(timezone.utc)
         db.commit()
         return {"phase": "finished", "prompt_type": "outro",
                 "prompt_text": OUTRO_TEXT.get(language, OUTRO_TEXT["en"]), "transcript": transcript}
@@ -488,8 +650,6 @@ async def turn(
                         tone_desc=tone_desc, tone_data=tone_data,
                         body_desc=body_desc, body_data=body_data)
 
-    # Inject tone + body_language into the response so the frontend has it
-    # without needing to call /summary (which can fail over flaky tunnels).
     if tone_data and isinstance(response, dict):
         response["tone"] = tone_data
     if body_data and isinstance(response, dict):
@@ -522,7 +682,6 @@ async def transcribe_only(
     user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
-    """Transcribe audio without evaluation. Used for rapid-fire audio mode."""
     s = db.get(InterviewSession, UUID(session_id))
     if not s or str(s.user_id) != user_id:
         raise HTTPException(404, detail="Session not found")
@@ -533,13 +692,9 @@ async def transcribe_only(
 
     return {"transcript": transcript or ""}
 
+
 @router.websocket("/{session_id}/video")
 async def video_ws(websocket: WebSocket, session_id: str):
-    """
-    Receives base64-encoded JPEG frames from the client.
-    Server runs MediaPipe to compute eye contact, smile, gestures, etc.
-    Echoes live signals back so the UI can render bars/badges.
-    """
     await websocket.accept()
     tracker = get_tracker(session_id) or create_tracker(session_id)
     try:
@@ -558,12 +713,14 @@ async def video_ws(websocket: WebSocket, session_id: str):
                 break
     except: pass
 
+
 @router.get("/{session_id}/summary")
 def get_interview_summary(session_id: str, user_id: str = Depends(get_current_user_id),
                           db: Session = Depends(get_db)):
     s = db.get(InterviewSession, UUID(session_id))
     if not s or str(s.user_id) != user_id: raise HTTPException(404)
-    return build_interview_summary(db, s.id)
+    return build_interview_summary(db, s.id, user_id=UUID(user_id))
+
 
 @router.get("")
 def list_my_interviews(user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
@@ -589,22 +746,18 @@ def list_my_interviews(user_id: str = Depends(get_current_user_id), db: Session 
             "company": s.company,
             "mode": config.get("mode", "text"),
             "is_rapid": s.is_rapid,
+            "practice_mode": s.practice_mode,
+            "finished_early": s.finished_early,
             "num_questions": q_count,
             "num_answered": answered,
             "created_at": s.created_at.isoformat() if s.created_at else None,
+            "finished_at": s.finished_at.isoformat() if s.finished_at else None,
         })
     return results
 
 
 @router.get("/analytics")
 def get_interview_analytics(user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
-    """
-    Aggregated analytics across all interview sessions:
-    - Score trend over time
-    - Weak areas by question_type
-    - Per-role breakdown
-    - Improvement rate
-    """
     uid = UUID(user_id)
 
     sessions = db.query(InterviewSession).filter(
@@ -622,9 +775,9 @@ def get_interview_analytics(user_id: str = Depends(get_current_user_id), db: Ses
             "best_score": 0,
             "recent_avg": 0,
             "improvement": 0,
+            "focused_unlocked": False,
         }
 
-    # ── Score trend (per session, chronological) ──
     score_trend = []
     for s in sessions:
         score_trend.append({
@@ -634,7 +787,6 @@ def get_interview_analytics(user_id: str = Depends(get_current_user_id), db: Ses
             "date": s.created_at.isoformat() if s.created_at else None,
         })
 
-    # ── Per question_type analytics ──
     all_sqs = (
         db.query(SessionQuestion)
         .join(InterviewSession, InterviewSession.id == SessionQuestion.session_id)
@@ -658,7 +810,6 @@ def get_interview_analytics(user_id: str = Depends(get_current_user_id), db: Ses
             "count": len(scores),
         })
 
-    # ── Per-role breakdown ──
     role_scores: dict[str, list[int]] = {}
     for s in sessions:
         role_scores.setdefault(s.role_name, []).append(s.total_score or 0)
@@ -671,19 +822,27 @@ def get_interview_analytics(user_id: str = Depends(get_current_user_id), db: Ses
             "best_score": max(scores) if scores else 0,
         }
 
-    # ── Overall stats ──
     all_scores = [s.total_score for s in sessions if s.total_score is not None]
     avg_score = int(sum(all_scores) / len(all_scores)) if all_scores else 0
     best_score = max(all_scores) if all_scores else 0
 
-    # Recent average (last 5 sessions)
     recent = all_scores[-5:] if len(all_scores) >= 5 else all_scores
     recent_avg = int(sum(recent) / len(recent)) if recent else 0
 
-    # Improvement: recent avg vs first 5 sessions avg
     early = all_scores[:5] if len(all_scores) >= 5 else all_scores
     early_avg = int(sum(early) / len(early)) if early else 0
     improvement = recent_avg - early_avg
+
+    finished_count = (
+        db.query(InterviewSession)
+        .filter(
+            InterviewSession.user_id == uid,
+            # Both 'finished' and 'outro' are terminal — see the start endpoint
+            # for the same logic.
+            InterviewSession.phase.in_(["finished", "outro"]),
+        )
+        .count()
+    )
 
     return {
         "total_sessions": len(sessions),
@@ -694,8 +853,236 @@ def get_interview_analytics(user_id: str = Depends(get_current_user_id), db: Ses
         "best_score": best_score,
         "recent_avg": recent_avg,
         "improvement": improvement,
+        # NEW: tells the Flutter setup screen whether to enable Focused mode.
+        "focused_unlocked": finished_count >= MIN_SESSIONS_FOR_FOCUSED,
+        "finished_count": finished_count,
     }
 
+
+# ─────────────────────────────────────────
+#  RESUME / FINALIZE
+# ─────────────────────────────────────────
+
+@router.get("/{session_id}/resume")
+def resume_interview(
+    session_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """
+    Returns the state needed to re-enter an in-progress session at the
+    correct point. Used by the history screen's 'Resume' action.
+    """
+    s = db.get(InterviewSession, UUID(session_id))
+    if not s or str(s.user_id) != user_id:
+        raise HTTPException(404, detail="Session not found")
+
+    if s.phase in ("finished", "outro"):
+        raise HTTPException(400, detail="Session is already finished")
+
+    language = s.language or "en"
+    mode = (s.intro_evaluation_json or {}).get("mode", "text")
+
+    # Find current question (first unanswered one) and total counts.
+    sqs = (
+        db.query(SessionQuestion)
+        .filter(SessionQuestion.session_id == s.id)
+        .order_by(SessionQuestion.id)
+        .all()
+    )
+    total = len(sqs)
+    answered = sum(1 for sq in sqs if sq.user_answer is not None)
+
+    current_sq = None
+    if s.current_sq_id:
+        for sq in sqs:
+            if sq.id == s.current_sq_id and sq.user_answer is None:
+                current_sq = sq
+                break
+    if current_sq is None:
+        current_sq = next((sq for sq in sqs if sq.user_answer is None), None)
+
+    if current_sq is None:
+        # Everything answered but phase != finished — odd state. Just finalize.
+        s.phase = "finished"
+        if not s.finished_at:
+            s.finished_at = datetime.now(timezone.utc)
+        _update_total_score(s, db)
+        db.commit()
+        return {
+            "session_id": str(s.id),
+            "phase": "finished",
+            "mode": mode,
+            "role_name": s.role_name,
+            "total_questions": total,
+            "answered": answered,
+            "prompt_text": OUTRO_TEXT.get(language, OUTRO_TEXT["en"]),
+        }
+
+    if mode == "video":
+        # Reset/re-create tracker for this session.
+        if not get_tracker(str(s.id)):
+            create_tracker(str(s.id))
+
+    return {
+        "session_id": str(s.id),
+        "phase": s.phase,
+        "mode": mode,
+        "role_name": s.role_name,
+        "language": language,
+        "prompt_text": _get_sq_question_text(current_sq, db, language),
+        "current_question_id": str(current_sq.question_id) if current_sq.question_id else None,
+        "current_question_type": current_sq.question_type,
+        "answered": answered,
+        "total_questions": total,
+        "company": s.company,
+        "question_source": s.question_source,
+        "practice_mode": s.practice_mode,
+    }
+
+
+@router.post("/{session_id}/finalize")
+def finalize_interview(
+    session_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """
+    Called by the 'End & View Scores' button in the Flutter UI.
+
+    Marks any unanswered questions as skipped (score=0, ai_feedback='skipped'),
+    recomputes total_score, and sets phase='finished', finished_early=True,
+    finished_at=now(). Idempotent — safe to call on an already-finished session.
+    """
+    s = db.get(InterviewSession, UUID(session_id))
+    if not s or str(s.user_id) != user_id:
+        raise HTTPException(404, detail="Session not found")
+
+    mode = (s.intro_evaluation_json or {}).get("mode", "text")
+    if mode == "video":
+        remove_tracker(str(s.id))
+
+    if s.phase == "finished":
+        # Already finished — return current snapshot.
+        return _finalize_response(s, db)
+
+    # Mark unanswered SQs as skipped.
+    sqs = (
+        db.query(SessionQuestion)
+        .filter(
+            SessionQuestion.session_id == s.id,
+            SessionQuestion.user_answer.is_(None),
+        )
+        .all()
+    )
+    for sq in sqs:
+        sq.user_answer = ""
+        sq.score = 0
+        sq.ai_feedback = "Skipped"
+        sq.evaluation_json = {
+            **(sq.evaluation_json or {}),
+            "skipped": True,
+            "attempts": (sq.evaluation_json or {}).get("attempts", []) + [
+                {"answer": "", "evaluation": {
+                    "score": 0,
+                    "answer_type": "off_topic",
+                    "final_feedback": "Skipped — session ended early.",
+                    "correct_answer": "",
+                }, "action": "next", "skipped": True},
+            ],
+        }
+
+    s.phase = "finished"
+    s.finished_early = True
+    s.finished_at = datetime.now(timezone.utc)
+    s.followup_count = 0
+    db.flush()
+    _update_total_score(s, db)
+    db.commit()
+    db.refresh(s)
+    return _finalize_response(s, db)
+
+
+def _finalize_response(s: InterviewSession, db: Session) -> dict:
+    answered = db.query(SessionQuestion).filter(
+        SessionQuestion.session_id == s.id,
+        SessionQuestion.user_answer.isnot(None),
+    ).count()
+    total = db.query(SessionQuestion).filter(
+        SessionQuestion.session_id == s.id,
+    ).count()
+    return {
+        "session_id": str(s.id),
+        "phase": s.phase,
+        "total_score": s.total_score,
+        "finished_early": s.finished_early,
+        "finished_at": s.finished_at.isoformat() if s.finished_at else None,
+        "num_answered": answered,
+        "num_questions": total,
+    }
+
+
+# ─────────────────────────────────────────
+#  RELEVANCE FEEDBACK
+# ─────────────────────────────────────────
+
+class RelevanceRequest(BaseModel):
+    relevant: bool
+
+
+@router.post("/{session_id}/questions/{question_id}/relevance")
+def post_question_relevance(
+    session_id: str,
+    question_id: str,
+    body: RelevanceRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """
+    Lightweight 'was this question relevant?' signal from inside an interview.
+    Distinct from community votes — this is a per-session per-user yes/no
+    that we can later aggregate into community moderation if we want.
+    """
+    try:
+        sid = UUID(session_id)
+        qid = UUID(question_id)
+    except ValueError:
+        raise HTTPException(400, detail="Invalid id")
+
+    s = db.get(InterviewSession, sid)
+    if not s or str(s.user_id) != user_id:
+        raise HTTPException(404, detail="Session not found")
+
+    q = db.get(Question, qid)
+    if not q:
+        raise HTTPException(404, detail="Question not found")
+
+    uid = UUID(user_id)
+    existing = (
+        db.query(QuestionRelevanceFeedback)
+        .filter(
+            QuestionRelevanceFeedback.session_id == sid,
+            QuestionRelevanceFeedback.question_id == qid,
+            QuestionRelevanceFeedback.user_id == uid,
+        )
+        .one_or_none()
+    )
+    if existing:
+        existing.relevant = body.relevant
+    else:
+        db.add(QuestionRelevanceFeedback(
+            session_id=sid,
+            question_id=qid,
+            user_id=uid,
+            relevant=body.relevant,
+        ))
+    db.commit()
+    return {"ok": True, "relevant": body.relevant}
+
+
+# ─────────────────────────────────────────
+#  RETAKE
+# ─────────────────────────────────────────
 
 @router.post("/{session_id}/retake")
 def retake_interview(
@@ -703,10 +1090,6 @@ def retake_interview(
     user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
-    """
-    Reset an existing interview session — clears all scores and answers
-    so the user can retry the same questions with a fresh start.
-    """
     uid = UUID(user_id)
     s = db.get(InterviewSession, UUID(session_id))
     if not s or str(s.user_id) != user_id:
@@ -715,7 +1098,6 @@ def retake_interview(
     language = _get_language(db, uid)
     profile = db.get(Profile, uid)
 
-    # ── Reset all session question data ──
     sqs = (
         db.query(SessionQuestion)
         .filter(SessionQuestion.session_id == s.id)
@@ -726,7 +1108,6 @@ def retake_interview(
     first_sq_id = None
     all_question_data = []
     for sq in sqs:
-        # Clear answers, scores, feedback, evaluation data
         sq.user_answer = None
         sq.score = None
         sq.ai_feedback = None
@@ -737,7 +1118,6 @@ def retake_interview(
 
         q_text = sq.question_text or ""
         if not q_text and sq.question_id:
-            from app.models.question import Question
             q = db.get(Question, sq.question_id)
             if q:
                 q_text = q.get_text(language)
@@ -749,7 +1129,6 @@ def retake_interview(
             "question_type": sq.question_type,
         })
 
-    # ── Reset session-level data ──
     s.phase = "rapid" if s.is_rapid else "intro"
     s.current_index = 0
     s.current_sq_id = first_sq_id
@@ -757,13 +1136,15 @@ def retake_interview(
     s.total_score = None
     s.intro_score = None
     s.intro_feedback = None
+    s.finished_early = False
+    s.finished_at = None
 
-    # Keep profile_context and mode from old config, clear intro evaluation
     old_config = s.intro_evaluation_json or {}
     s.intro_evaluation_json = {
         "followup_max": old_config.get("followup_max", 1),
         "mode": old_config.get("mode", "text"),
         "profile_context": old_config.get("profile_context", {}),
+        "practice_mode": s.practice_mode,
     }
 
     config = s.intro_evaluation_json
@@ -795,6 +1176,7 @@ class RapidAnswer(BaseModel):
     question_index: int
     answer_text: str
 
+
 class RapidSubmitRequest(BaseModel):
     answers: list[RapidAnswer]
 
@@ -824,7 +1206,6 @@ def rapid_submit(
     if not sqs:
         raise HTTPException(400, detail="No questions in session")
 
-    # Map answers by index
     answer_map = {a.question_index: a.answer_text for a in body.answers}
 
     results = []
@@ -836,7 +1217,6 @@ def rapid_submit(
         q_type = sq.question_type or "technical"
 
         if not answer:
-            # Unanswered — score 0
             sq.user_answer = ""
             sq.score = 0
             sq.ai_feedback = "No answer provided"
@@ -845,7 +1225,6 @@ def rapid_submit(
             scores.append(0)
             continue
 
-        # Score each answer
         result = evaluate_and_decide(
             answer=answer, question=q_text, role=s.role_name,
             language=language, question_type=q_type,
@@ -859,6 +1238,7 @@ def rapid_submit(
             "skill_match": result.get("skill_match", 0),
             "communication_score": result.get("communication_score", 0),
             "final_feedback": result.get("final_feedback", ""),
+            "tip": result.get("tip", ""),
             "answer_type": result.get("answer_type", "answered"),
             "correct_answer": result.get("correct_answer", ""),
         }
@@ -873,13 +1253,14 @@ def rapid_submit(
             "score": sq.score,
             "answer_type": evaluation["answer_type"],
             "feedback": evaluation.get("final_feedback", ""),
+            "tip": evaluation.get("tip", ""),
             "correct_answer": evaluation.get("correct_answer", ""),
         })
         scores.append(sq.score)
 
-    # Update session
     s.total_score = int(sum(scores) / len(scores)) if scores else 0
     s.phase = "finished"
+    s.finished_at = datetime.now(timezone.utc)
     db.commit()
 
     return {
@@ -897,10 +1278,12 @@ def _get_language(db: Session, user_id: UUID) -> str:
     p = db.get(Profile, user_id)
     return p.language if p and p.language in ("ar", "en") else "en"
 
+
 def _get_followup_max(s: InterviewSession) -> int:
     if isinstance(s.intro_evaluation_json, dict):
         return int(s.intro_evaluation_json.get("followup_max", 1))
     return 1
+
 
 def _get_cv_summary(db: Session, user_id: UUID) -> str | None:
     doc = db.query(CVDocument).filter(CVDocument.user_id == user_id)\
@@ -917,10 +1300,9 @@ def _get_cv_summary(db: Session, user_id: UUID) -> str | None:
     else:
         all_skills = []
     if all_skills: parts.append(f"Skills: {', '.join(all_skills[:15])}")
-    # Include projects for CV question generation
     projects = data.get("projects", [])
     if isinstance(projects, list) and projects:
-        random.shuffle(projects)  # randomize so LLM doesn't always pick the first
+        random.shuffle(projects)
         proj_text = "; ".join(str(p) for p in projects[:5])
         parts.append(f"Projects: {proj_text[:300]}")
     experience = data.get("experience", [])
@@ -928,12 +1310,10 @@ def _get_cv_summary(db: Session, user_id: UUID) -> str | None:
         random.shuffle(experience)
         exp_text = "; ".join(str(e) for e in experience[:5])
         parts.append(f"Experience: {exp_text[:300]}")
-    # Include certifications
     certs = data.get("certifications", []) or data.get("certificates", [])
     if isinstance(certs, list) and certs:
         cert_text = "; ".join(str(c) for c in certs[:5])
         parts.append(f"Certifications: {cert_text[:300]}")
-    # Shuffle section order so LLM doesn't always focus on the first section
     random.shuffle(parts)
     return "\n".join(parts) if parts else None
 
@@ -967,7 +1347,6 @@ def _update_total_score(s: InterviewSession, db: Session):
 
 
 def _get_sq_question_text(sq: SessionQuestion, db: Session, language: str = "en") -> str:
-    """Get question text — from session_question.question_text (CV) or Question table (bank)."""
     if sq.question_text:
         return sq.question_text
     if sq.question_id:
@@ -994,6 +1373,7 @@ def _handle_intro(s, answer, transcript, language, db, tone_desc="", tone_data=N
     sq = _get_current_sq(s, db)
     if not sq:
         s.phase = "outro"
+        s.finished_at = datetime.now(timezone.utc)
         db.commit()
         return {"phase": "outro", "prompt_type": "outro",
                 "prompt_text": OUTRO_TEXT.get(language, OUTRO_TEXT["en"]),
@@ -1014,7 +1394,9 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
                  tone_desc="", tone_data=None, body_desc="", body_data=None):
     sq = _get_current_sq(s, db)
     if not sq:
-        s.phase = "outro"; db.commit()
+        s.phase = "outro"
+        s.finished_at = datetime.now(timezone.utc)
+        db.commit()
         return {"phase": "outro", "prompt_type": "outro",
                 "prompt_text": OUTRO_TEXT.get(language, OUTRO_TEXT["en"]),
                 "transcript": transcript, "total_score": s.total_score}
@@ -1022,20 +1404,15 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
     q_text = _get_sq_question_text(sq, db, language)
     q_type = sq.question_type or "technical"
 
-    # ── Determine what question text to evaluate against ──
-    # If we're in a follow-up, the user is answering the follow-up question,
-    # NOT the original question. We must evaluate against the follow-up text.
-    eval_question_text = q_text  # default: the original question
+    eval_question_text = q_text
     is_followup_answer = s.followup_count > 0
     if is_followup_answer:
-        # Get the follow-up question from the last attempt that triggered it
         attempts = (sq.evaluation_json or {}).get("attempts", [])
         for att in reversed(attempts):
             if att.get("action") == "follow_up" and att.get("follow_up_question"):
                 eval_question_text = att["follow_up_question"]
                 break
 
-    # ── Clarification detection ──
     classification = classify_user_input(
         user_text=answer,
         current_question=eval_question_text,
@@ -1043,6 +1420,7 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
         language=language,
     )
 
+    # ── Clarification: explain WITHOUT giving the answer ──
     if classification.get("type") == "clarification":
         if not sq.evaluation_json:
             sq.evaluation_json = {"attempts": [], "clarify_count": 0}
@@ -1101,7 +1479,9 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
 
             next_sq = _advance_pointer(s, db)
             if not next_sq:
-                s.phase = "outro"; db.commit()
+                s.phase = "outro"
+                s.finished_at = datetime.now(timezone.utc)
+                db.commit()
                 return {"phase": "outro", "action": "end", "prompt_type": "outro",
                         "prompt_text": OUTRO_TEXT.get(language, OUTRO_TEXT["en"]),
                         "evaluation": curiosity_eval, "explanation": curiosity_response,
@@ -1114,7 +1494,7 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
                     "evaluation": curiosity_eval, "explanation": curiosity_response,
                     "transcript": transcript, "total_score": s.total_score}
 
-    # ── Evaluate against the correct question (original or follow-up) ──
+    # ── Evaluate normal answer ──
     profile_context = (s.intro_evaluation_json or {}).get("profile_context")
     result = evaluate_and_decide(
         answer=answer, question=eval_question_text, role=s.role_name,
@@ -1130,6 +1510,7 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
         "skill_match": result.get("skill_match", 0),
         "communication_score": result.get("communication_score", 0),
         "final_feedback": result.get("final_feedback", ""),
+        "tip": result.get("tip", ""),
         "answer_type": result.get("answer_type", "answered"),
         "correct_answer": result.get("correct_answer", ""),
     }
@@ -1138,7 +1519,6 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
     followup_q = (result.get("follow_up_question") or "").strip()
     answer_type = result.get("answer_type", "answered")
 
-    # ── Store attempt with follow-up metadata ──
     if not sq.evaluation_json: sq.evaluation_json = {"attempts": []}
     attempt = {"answer": answer, "evaluation": evaluation, "action": action}
     if is_followup_answer:
@@ -1153,7 +1533,6 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
         "attempts": sq.evaluation_json.get("attempts", []) + [attempt],
     }
 
-    # ── Off-topic: re-ask with cap ──
     if answer_type == "off_topic":
         reask_count = len([
             a for a in sq.evaluation_json.get("attempts", [])
@@ -1169,7 +1548,9 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
             _update_total_score(s, db)
             next_sq = _advance_pointer(s, db)
             if not next_sq:
-                s.phase = "outro"; db.commit()
+                s.phase = "outro"
+                s.finished_at = datetime.now(timezone.utc)
+                db.commit()
                 return {"phase": "outro", "action": "end", "prompt_type": "outro",
                         "prompt_text": OUTRO_TEXT.get(language, OUTRO_TEXT["en"]),
                         "evaluation": evaluation, "transcript": transcript,
@@ -1192,7 +1573,6 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
                 "question_type": q_type, "evaluation": evaluation,
                 "transcript": transcript, "reask_count": reask_count, "reask_max": MAX_REASK}
 
-    # ── Admitted ignorance / partial ──
     if answer_type in ("admitted_ignorance", "partial"):
         s.followup_count = 0
         sq.user_answer = sq.user_answer or answer
@@ -1203,7 +1583,9 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
         _update_total_score(s, db)
         next_sq = _advance_pointer(s, db)
         if not next_sq:
-            s.phase = "outro"; db.commit()
+            s.phase = "outro"
+            s.finished_at = datetime.now(timezone.utc)
+            db.commit()
             return {"phase": "outro", "action": "end", "prompt_type": "outro",
                     "prompt_text": OUTRO_TEXT.get(language, OUTRO_TEXT["en"]),
                     "evaluation": evaluation, "correct_answer": correct,
@@ -1216,10 +1598,8 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
                 "evaluation": evaluation, "correct_answer": correct,
                 "transcript": transcript, "total_score": s.total_score}
 
-    # ── Follow-up: DO NOT set user_answer — keep sq pointer alive ──
     if action in ("follow_up", "clarify") and s.followup_count < followup_max and followup_q:
         s.followup_count += 1
-        # Save baseline score from first attempt but do NOT set user_answer
         if sq.score is None:
             sq.score = int(evaluation.get("score", 0))
             sq.ai_feedback = evaluation.get("final_feedback", "")
@@ -1232,11 +1612,9 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
                 "transcript": transcript, "followup_count": s.followup_count,
                 "followup_max": followup_max}
 
-    # ── Finalize + next ──
     s.followup_count = 0
     if sq.user_answer is None:
-        sq.user_answer = answer  # keep original answer from first attempt
-    # Combine scores: use the better of original vs follow-up
+        sq.user_answer = answer
     new_score = int(evaluation.get("score", 0))
     if sq.score is not None and is_followup_answer:
         sq.score = max(sq.score, (sq.score + new_score) // 2)
@@ -1248,7 +1626,9 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
 
     next_sq = _advance_pointer(s, db)
     if not next_sq:
-        s.phase = "outro"; db.commit()
+        s.phase = "outro"
+        s.finished_at = datetime.now(timezone.utc)
+        db.commit()
         return {"phase": "outro", "action": "end", "prompt_type": "outro",
                 "prompt_text": OUTRO_TEXT.get(language, OUTRO_TEXT["en"]),
                 "evaluation": evaluation, "transcript": transcript,

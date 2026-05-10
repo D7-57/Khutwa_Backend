@@ -22,6 +22,14 @@ class InterviewSession(Base):
     use_cv: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_rapid: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
+    # ── NEW: practice mode (free | focused) ──
+    # 'focused' biases question selection toward weak areas and tells the
+    # evaluator to frame feedback as targeted improvement rather than fresh
+    # discovery. Defaults to 'free' so legacy clients keep working.
+    practice_mode: Mapped[str] = mapped_column(
+        Text, nullable=False, default="free", server_default="free"
+    )
+
     # ── flow control ──
     phase: Mapped[str] = mapped_column(Text, nullable=False, default="intro")
     current_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -35,6 +43,16 @@ class InterviewSession(Base):
 
     # ── overall ──
     total_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # ── NEW: did the user end the session before answering everything? ──
+    # We still mark phase='finished' so history sorts/displays correctly,
+    # and remaining questions get score=0 with a 'skipped' marker.
+    finished_early: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    finished_at: Mapped["DateTime | None"] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -56,14 +74,14 @@ class SessionQuestion(Base):
         nullable=False,
     )
 
-    # ── CHANGED: nullable for CV-generated questions that aren't in the bank ──
+    # Nullable for CV-generated questions that aren't in the bank.
     question_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("questions.id"),
-        nullable=True,  # was nullable=False
+        nullable=True,
     )
 
-    # ── NEW: stores question text directly for CV-generated questions ──
+    # Stores question text directly for CV-generated questions.
     # When question_id is set, this can be null (text comes from the Question row).
     # When question_id is null (CV question), this holds the text.
     question_text: Mapped[str | None] = mapped_column(Text, nullable=True)

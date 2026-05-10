@@ -1,9 +1,16 @@
 """
-AI service for community question validation and translation.
+AI service for community question validation and translation — v2.
 
-- Validates questions (rejects offensive, nonsensical, non-questions)
-- Translates between Arabic and English
-- Light touch: accepts weird/unique questions, only rejects truly bad ones
+NEW IN V2:
+  Returns a `quality_score` (0..100) so the router can decide:
+    >= 70  → status='approved' (high quality, on-topic, well-formed)
+    40-69  → status='pending'  (let the community vote decide)
+    < 40   → status='rejected' (off-topic, gibberish, spam)
+
+The previous version only filtered for safety (offensive / not-a-question /
+illegal), which let through every "off-track" question that was technically
+a legitimate sentence — e.g. a marketing question submitted under
+'software_engineer'. The quality scorer addresses that.
 """
 
 import json
@@ -21,73 +28,111 @@ def validate_and_translate(
     role_name: str = "",
 ) -> dict:
     """
-    Validate a community-submitted question and translate it.
+    Validate a community-submitted question, score its quality, and translate it.
 
     Returns:
         {
-            "approved": True/False,
-            "rejection_reason": "..." or None,
-            "text_en": "...",
-            "text_ar": "...",
+            "approved":         True | False,        # convenience: quality_score >= 40
+            "quality_score":    0..100,              # used by router for tier decision
+            "rejection_reason": "..." | None,
+            "text_en":          "...",
+            "text_ar":          "...",
         }
     """
     target_language = "Arabic" if source_language == "en" else "English"
     source_label = "English" if source_language == "en" else "Arabic"
 
-    prompt = f"""You are reviewing a community-submitted interview question for the role: {role_name or 'general'}.
+    prompt = f"""You are reviewing a community-submitted interview question.
+Target role: {role_name or 'general'}
+Source language: {source_label}
 
-The question was written in {source_label}:
+Question:
 \"\"\"{question_text}\"\"\"
 
-Do TWO things:
+Do THREE things:
 
-1. VALIDATE: Is this an acceptable interview question?
-   - APPROVE if it's a legitimate question, even if unusual, niche, creative, or oddly worded
-   - APPROVE trick questions, scenario questions, opinion questions — these are all valid interview formats
-   - Only REJECT if it is:
-     * Offensive, discriminatory, or contains slurs/hate speech
-     * Not a question at all (just random text, spam, or gibberish)
-     * Asking for illegal activity
-   - Be LENIENT. When in doubt, approve. Unique questions are valuable.
+1. SAFETY CHECK
+   Reject (quality_score = 0) if it is:
+     - Offensive, discriminatory, contains slurs/hate speech
+     - Asking for illegal activity
+     - Pure spam, gibberish, or not a question at all
 
-2. TRANSLATE: Translate the question into {target_language}.
-   - Keep the same tone and meaning
-   - If it references culture-specific concepts, adapt naturally
-   - For technical terms, keep them in English even in Arabic translation
+2. QUALITY SCORE (0..100). Judge the question itself, not the answer.
+   Consider:
+     - On-topic for the role? (off-topic for the role is a big penalty)
+     - Well-formed (clear, unambiguous, real interview-style)?
+     - Tests something useful — knowledge, skill, judgment, or behavior?
+     - Not a duplicate of a 101 textbook definition (those score lower)
+     - Trick / scenario / opinion questions are FINE — they can score high
+
+   Rough anchors:
+     90-100 = sharp, role-specific, would impress an interviewer
+     70-89  = solid, usable in a real interview
+     50-69  = passable but generic, awkward wording, or borderline relevance
+     30-49  = poorly worded, too vague, or weakly related to the role
+     10-29  = barely an interview question (off-track, rambling, irrelevant)
+     0-9    = safety reject or pure noise
+
+   Be CALIBRATED, not lenient. The whole point is to filter off-track items.
+
+3. TRANSLATE the question into {target_language}.
+   - Preserve tone and meaning
+   - Keep technical terms in English even in the Arabic translation
+   - Adapt culture-specific phrasing naturally
+
+If quality_score < 40, set rejection_reason to a SHORT human-readable
+note in {source_label} so the submitter understands what was wrong.
+Otherwise leave rejection_reason null.
 
 Return ONLY JSON (no markdown):
 {{
-  "approved": true/false,
-  "rejection_reason": "brief reason in {source_label}" or null,
-  "translated_text": "the question in {target_language}"
+  "quality_score": 0-100,
+  "rejection_reason": "..." or null,
+  "translated_text": "..."
 }}"""
 
     try:
         resp = client.chat.completions.create(
             model=MODEL,
             messages=[
-                {"role": "system", "content": "You validate and translate interview questions. JSON only, no markdown. Be lenient — approve anything that's a legitimate question."},
+                {
+                    "role": "system",
+                    "content": (
+                        "You score and translate interview questions. "
+                        "JSON only, no markdown. Be calibrated — the score "
+                        "should genuinely separate off-topic submissions from "
+                        "good ones."
+                    ),
+                },
                 {"role": "user", "content": prompt},
             ],
             temperature=0.2,
         )
 
         raw = (resp.choices[0].message.content or "").strip()
-        # Parse JSON
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:
             import re
-            match = re.search(r'\{.*\}', raw, re.DOTALL)
+            match = re.search(r"\{.*\}", raw, re.DOTALL)
             data = json.loads(match.group(0)) if match else {}
 
-        approved = data.get("approved", True)  # default to approve
+        # ── Parse + clamp quality score ──
+        try:
+            quality_score = int(data.get("quality_score", 50))
+        except (ValueError, TypeError):
+            quality_score = 50
+        quality_score = max(0, min(100, quality_score))
+
+        approved = quality_score >= 40  # backward-compat boolean
         rejection_reason = data.get("rejection_reason") if not approved else None
+
         translated = (data.get("translated_text") or "").strip()
 
         if source_language == "en":
             return {
                 "approved": approved,
+                "quality_score": quality_score,
                 "rejection_reason": rejection_reason,
                 "text_en": question_text.strip(),
                 "text_ar": translated or question_text.strip(),
@@ -95,15 +140,17 @@ Return ONLY JSON (no markdown):
         else:
             return {
                 "approved": approved,
+                "quality_score": quality_score,
                 "rejection_reason": rejection_reason,
                 "text_en": translated or question_text.strip(),
                 "text_ar": question_text.strip(),
             }
 
     except Exception:
-        # If AI fails, approve and use original text for both
+        # If AI fails, neither approve nor reject — let community decide.
         return {
             "approved": True,
+            "quality_score": 50,
             "rejection_reason": None,
             "text_en": question_text.strip(),
             "text_ar": question_text.strip(),

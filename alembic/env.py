@@ -14,6 +14,9 @@ from app.models.cv_quiz import CVQuiz, CVQuizAttempt  # noqa
 from app.models.career.role import Role, UserRole #noqa
 from app.models.career.skill import Skill, UserSkill
 from app.models.career.role_skill import RoleSkill
+# Import ALL your models so Alembic sees their tables
+from app.models.question import Question
+from app.models.question_vote import QuestionVote, QuestionRelevanceFeedback # noqa
 
 
 config = context.config

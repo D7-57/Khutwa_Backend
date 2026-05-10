@@ -1,13 +1,16 @@
 """
-AI Interview Services — v2
+AI Interview Services — v3
 
-Changes:
-  1. score_answer + decide_next → evaluate_and_decide (1 LLM call)
-  2. answer_type classification
-  3. gpt-4o for eval, gpt-4o-mini for generation
-  4. generate_ai_questions → generate_cv_questions (only for CV-based Qs)
-  5. AI questions no longer saved to Question table
-  6. Intro variants with personalization
+Changes vs v2:
+  • Dynamic difficulty: profile_context now carries `experience_band` from the
+    real profiles.years_of_experience column. Used to nudge expectations.
+  • Focused-practice framing: when profile_context['focus_mode'] is true, the
+    evaluator frames feedback as targeted improvement on a known weak area.
+  • Clarification fix: classify_user_input now has a much stronger guardrail
+    against giving away the answer, and we run a quick post-check to catch
+    leaks. If the LLM still leaks, we fall back to a generic hint.
+  • Brief explanations are unchanged from v2 (still used for "curiosity" cases
+    where the user EXPLICITLY wants to learn).
 """
 
 import json
@@ -150,7 +153,7 @@ Candidate's answer: \"\"\"{answer}\"\"\""""
 
 
 # ─────────────────────────────────────────
-#  MERGED: EVALUATE + DECIDE (single LLM call)
+#  EVALUATE + DECIDE
 # ─────────────────────────────────────────
 
 SCORING_CRITERIA = {
@@ -174,6 +177,79 @@ SCORING_CRITERIA = {
 }
 
 
+def _profile_note(profile_context: dict | None) -> str:
+    """
+    Build a short context block for the evaluator prompt based on the user's
+    profile. Now consumes the dedicated `experience_band` (from
+    profiles.years_of_experience: '0' | '<1' | '1' | '2' | '3+') so we can
+    actually shape difficulty expectations.
+    """
+    if not profile_context:
+        return ""
+
+    status = (profile_context.get("status") or "").lower()
+    band = (profile_context.get("experience_band") or "").strip()
+    has_exp = profile_context.get("has_experience", False)
+    yoe = profile_context.get("years_of_experience", 0)
+    focus_mode = profile_context.get("focus_mode") is True
+
+    parts = []
+
+    # ── Experience band shapes expectations ──
+    if band in ("0", "<1") or (status == "student" and not has_exp):
+        parts.append(
+            "CANDIDATE CONTEXT: Entry-level — student or no professional experience. "
+            "Accept academic projects, coursework, and personal projects as valid examples. "
+            "Focus on conceptual understanding, not production-level depth. "
+            "Don't ask probing follow-ups about scale or production trade-offs."
+        )
+    elif band == "1":
+        parts.append(
+            "CANDIDATE CONTEXT: Junior (~1 year experience). Expect a real but "
+            "limited set of work examples; mix of academic and practical answers is fine. "
+            "Probing for specifics is OK; deep architecture trade-offs are NOT yet expected."
+        )
+    elif band == "2":
+        parts.append(
+            "CANDIDATE CONTEXT: Mid-level (~2 years experience). Expect concrete "
+            "production examples and sound reasoning. Vague or purely academic answers "
+            "should be marked down for this experience level."
+        )
+    elif band == "3+":
+        parts.append(
+            "CANDIDATE CONTEXT: Senior (3+ years experience). Expect strong, specific "
+            "real-world examples, ownership stories, and architectural reasoning. "
+            "Hold them to a high bar — vague answers should score low."
+        )
+    else:
+        # Fallback to legacy logic when band is not provided
+        if status == "student":
+            parts.append(
+                "CANDIDATE CONTEXT: Student. Accept academic projects and coursework as "
+                "valid examples. Focus on understanding rather than production-level depth."
+            )
+        elif status == "graduate" and not has_exp:
+            parts.append(
+                "CANDIDATE CONTEXT: Recent graduate, limited work experience. "
+                "Academic projects, internships, and personal projects count as valid."
+            )
+        elif has_exp and yoe >= 3:
+            parts.append(
+                f"CANDIDATE CONTEXT: Experienced ({yoe}+ roles). Expect real-world "
+                "examples and depth; mark down vague answers."
+            )
+
+    # ── Focused practice framing ──
+    if focus_mode:
+        parts.append(
+            "FOCUS MODE: This question targets a topic the candidate previously struggled "
+            "with. In the feedback, reference that this is a known weak area and give "
+            "concrete, actionable improvement guidance — not a generic 'good attempt' line."
+        )
+
+    return "\n\n" + "\n\n".join(parts) if parts else ""
+
+
 def evaluate_and_decide(
     answer: str,
     question: str,
@@ -184,7 +260,6 @@ def evaluate_and_decide(
     tone_desc: str = "",
     profile_context: dict | None = None,
 ) -> dict:
-    # Map legacy "soft" to "behavioral"
     if question_type == "soft":
         question_type = "behavioral"
     criteria = SCORING_CRITERIA.get(question_type, SCORING_CRITERIA["general"])
@@ -196,41 +271,7 @@ def evaluate_and_decide(
     elif question_type == "behavioral":
         type_guidance = "For behavioral: if answer lacks a concrete example, ask for a specific situation."
 
-    # ── Profile-aware context ──
-    profile_note = ""
-    if profile_context:
-        status = profile_context.get("status", "")
-        yoe = profile_context.get("years_of_experience", 0)
-        has_exp = profile_context.get("has_experience", False)
-
-        if status == "student":
-            profile_note = (
-                "\n\nCANDIDATE CONTEXT: This is a student with no/limited work experience. "
-                "Adjust expectations: accept academic projects and coursework as valid examples. "
-                "Don't penalize for lack of industry experience. Focus on understanding of concepts "
-                "rather than production-level depth."
-            )
-        elif status == "graduate" and not has_exp:
-            profile_note = (
-                "\n\nCANDIDATE CONTEXT: Recent graduate with limited work experience. "
-                "Academic projects, internships, and personal projects count as valid experience. "
-                "Focus on conceptual understanding and learning ability."
-            )
-        elif has_exp and yoe >= 3:
-            profile_note = (
-                f"\n\nCANDIDATE CONTEXT: Experienced professional ({yoe}+ roles). "
-                "Expect concrete real-world examples and deeper technical depth. "
-                "Vague or purely academic answers should be scored lower for this experience level."
-            )
-        elif has_exp:
-            profile_note = (
-                f"\n\nCANDIDATE CONTEXT: Has some work experience ({yoe} role(s)). "
-                "Expect a mix of academic and practical knowledge."
-            )
-
-    extra_context = ""
-    if profile_note:
-        extra_context += profile_note
+    extra_context = _profile_note(profile_context)
     if body_language_desc:
         extra_context += f"\n\nBODY LANGUAGE:\n{body_language_desc}"
     if tone_desc:
@@ -244,9 +285,10 @@ def evaluate_and_decide(
         "skill_match": "0-100",
         "communication_score": "0-100",
         "final_feedback": "concise feedback",
+        "tip": "ONE concrete actionable tip the candidate could apply next time",
         "action": "follow_up | next | re_ask",
         "follow_up_question": "only if action is follow_up",
-        "correct_answer": "only if admitted_ignorance or partial",
+        "correct_answer": "ALWAYS include a strong sample answer in 2-4 sentences (used as 'study material')",
     }
 
     prompt = f"""You are an expert interviewer evaluating a candidate's response.
@@ -269,7 +311,14 @@ SCORING PHILOSOPHY: Reward genuine understanding, not just confidence. A hesitan
 answer beats a confident wrong one. A candidate who gets the concept right but misses details
 deserves 55-70. Reserve below 35 for answers showing no relevant knowledge at all.
 
-STEP 3 — DECIDE action:
+STEP 3 — WRITE final_feedback (2-3 sentences) AND tip (ONE actionable next-time line).
+The tip MUST be specific to THIS question — not generic advice like "use STAR".
+Example tip: "Mention a measurable outcome like the % latency reduction you achieved."
+
+STEP 4 — ALWAYS write a strong correct_answer (2-4 sentences) so the user has study material,
+even if they answered well. This is the gold standard the candidate can compare against.
+
+STEP 5 — DECIDE action:
 - admitted_ignorance → "next" (don't drill into what they don't know)
 - off_topic → "re_ask"
 - partial → "next" (credit them, move on)
@@ -293,7 +342,7 @@ Answer: \"\"\"{answer}\"\"\""""
     resp = client.chat.completions.create(
         model=EVAL_MODEL,
         messages=[
-            {"role": "system", "content": "Professional interview evaluator. Be fair — reward real knowledge, don't inflate weak answers. Evaluate AND decide next action. JSON only, no markdown."},
+            {"role": "system", "content": "Professional interview evaluator. Be fair — reward real knowledge, don't inflate weak answers. Always provide a correct_answer and a specific tip. JSON only, no markdown."},
             {"role": "user", "content": prompt},
         ],
         temperature=0.3,
@@ -304,19 +353,17 @@ Answer: \"\"\"{answer}\"\"\""""
     result.setdefault("action", "next")
     result.setdefault("follow_up_question", "")
     result.setdefault("correct_answer", "")
+    result.setdefault("tip", "")
     result.setdefault("score", 0)
 
-    # Force action based on answer_type
     if result["answer_type"] == "admitted_ignorance":
         result["action"] = "next"
     if result["answer_type"] == "off_topic" and result["action"] != "re_ask":
         result["action"] = "re_ask"
 
-    # Parse and clamp score
     try: result["score"] = int(result["score"])
     except (ValueError, TypeError): result["score"] = 0
 
-    # Enforce score ranges per answer_type — LLM sometimes ignores these
     at = result["answer_type"]
     s = result["score"]
     if at == "admitted_ignorance":
@@ -326,15 +373,14 @@ Answer: \"\"\"{answer}\"\"\""""
     elif at == "partial":
         result["score"] = max(30, min(55, s)) if s > 0 else 35
 
-    # Fallback: if admitted_ignorance/partial but no correct_answer, generate one
-    if at in ("admitted_ignorance", "partial") and not (result.get("correct_answer") or "").strip():
+    # ── Always populate correct_answer (used as study material in summary) ──
+    if not (result.get("correct_answer") or "").strip():
         result["correct_answer"] = _generate_correct_answer(question, role, language)
 
     return result
 
 
 def _generate_correct_answer(question: str, role: str, language: str) -> str:
-    """Quick fallback to generate a correct answer when the eval LLM didn't provide one."""
     lang_note = "Answer in Arabic." if language == "ar" else "Answer in English."
     try:
         resp = client.chat.completions.create(
@@ -352,10 +398,7 @@ def _generate_correct_answer(question: str, role: str, language: str) -> str:
 
 
 def generate_brief_explanation(question: str, role: str, language: str) -> str:
-    """
-    Generate a brief educational explanation when the user doesn't know the answer.
-    This teaches them the concept so they learn, not just get scored.
-    """
+    """Used for genuine 'curiosity' (user explicitly asks to learn the topic)."""
     lang_note = "Respond in Arabic." if language == "ar" else "Respond in English."
     try:
         resp = client.chat.completions.create(
@@ -382,6 +425,52 @@ def generate_brief_explanation(question: str, role: str, language: str) -> str:
         return ""
 
 
+# ─────────────────────────────────────────
+#  CLASSIFY: answer | clarification | curiosity
+# ─────────────────────────────────────────
+
+# Generic clarification fallback when the LLM leaks the answer.
+# Used as a last-resort hint that's safe.
+_CLARIFY_FALLBACK = {
+    "ar": (
+        "السؤال يبحث عن فهمك العام للموضوع — جرّب تشرح الفكرة بكلماتك "
+        "وتعطي مثال إذا قدرت. مو لازم تكون إجابة كاملة."
+    ),
+    "en": (
+        "The question is asking for your general understanding of the topic — "
+        "try to explain the idea in your own words and give an example if you can. "
+        "It doesn't have to be a complete answer."
+    ),
+}
+
+
+def _looks_like_full_answer(text: str, question: str) -> bool:
+    """
+    Heuristic to catch the 'clarification leaked the answer' bug.
+    A clarification should describe what's being asked, not answer it.
+
+    Triggers:
+      - Response is suspiciously long (>400 chars) AND contains explanatory
+        markers like 'is a', 'means', 'because', 'for example', 'such as'
+        which indicate the LLM started teaching instead of redirecting.
+      - Response contains 4+ technical-style phrases (semicolons, lists)
+        suggesting a textbook answer.
+    """
+    t = (text or "").strip().lower()
+    if len(t) > 600:
+        return True
+    if len(t) > 400:
+        teaching_markers = (
+            " is a ", " is the ", " means ", " refers to ", " for example",
+            " such as ", " allows you to ", " consists of ", " is used to ",
+            "يعني ", "يعرف ", "يستخدم ", "مثال", "مثلاً",
+        )
+        hits = sum(1 for m in teaching_markers if m in t)
+        if hits >= 2:
+            return True
+    return False
+
+
 def classify_user_input(
     user_text: str,
     current_question: str,
@@ -393,9 +482,9 @@ def classify_user_input(
     or a curiosity/learning request.
 
     Returns:
-        {"type": "answer"} — normal answer, proceed to evaluation
-        {"type": "clarification", "response": "..."} — user asked what the question means
-        {"type": "curiosity", "response": "..."} — user wants to learn about the topic
+        {"type": "answer"}                                — proceed to evaluation
+        {"type": "clarification", "response": "..."}      — guide them WITHOUT giving the answer
+        {"type": "curiosity",     "response": "..."}      — they explicitly want to learn it
     """
     lang_note = "Respond in Arabic." if language == "ar" else "Respond in English."
 
@@ -403,25 +492,35 @@ def classify_user_input(
 They were asked: \"\"\"{current_question}\"\"\"
 They responded: \"\"\"{user_text}\"\"\"
 
-Classify their response:
-1. "answer" — they are attempting to answer the question (even poorly, even "I don't know")
-2. "clarification" — they are asking what the question means, asking for context,
-   or requesting the interviewer to rephrase/explain the question
-3. "curiosity" — they already said they don't know BUT are now asking to learn about the topic.
-   e.g. "Can you explain what that is?", "I'd love to know more about this",
-   "What does that mean?", "Why is it important?", "وش يعني هالشي؟", "ممكن توضح؟"
+Classify their response into ONE of:
 
-IMPORTANT: "I don't know" by itself is an ANSWER (type "answer"), not curiosity.
-Curiosity is when they explicitly ask the interviewer to teach/explain the concept.
+1. "answer" — they ARE attempting to answer (even poorly, even "I don't know").
+   "I don't know" by itself = answer, NOT curiosity.
 
-If it's a clarification, provide a helpful response that:
-- Explains what the question is looking for (without giving away the answer)
-- Gives them a hint about what direction to take
-- Keeps it to 2-3 sentences
+2. "clarification" — they're asking what the question MEANS or asking the
+   interviewer to rephrase. They want to understand the question, not learn the topic.
+   Examples: "what do you mean by X?", "could you rephrase?",
+             "are you asking about A or B?", "وش تقصد؟"
 
-If it's curiosity, provide a brief educational explanation:
-- What the concept is, why it matters, a simple example
-- 3-4 sentences max, practical and friendly
+3. "curiosity" — they have ALREADY admitted they don't know AND now explicitly
+   ask the interviewer to teach the concept.
+   Examples: "Can you explain what X is so I learn?", "I'd love to know more — what is it?"
+
+CRITICAL RULES FOR "clarification":
+- DO NOT answer the question.
+- DO NOT explain the underlying concept.
+- DO NOT define technical terms.
+- DO restate the question in simpler words OR clarify the scope ("are you asking
+  about implementation or about trade-offs?").
+- DO point out what category of answer is expected ("a brief example from your
+  experience"; "a high-level definition is fine").
+- Keep response 1-2 sentences, max 40 words.
+
+If the response would teach them what to say, you are doing it wrong — that's
+"curiosity", not "clarification". Pick the right category.
+
+For "curiosity" (they explicitly want to learn): give a brief 3-4 sentence
+educational explanation. This IS the place to teach.
 
 {lang_note}
 Return ONLY JSON:
@@ -433,28 +532,45 @@ Return ONLY JSON:
         resp = client.chat.completions.create(
             model=GEN_MODEL,
             messages=[
-                {"role": "system", "content": "Interview assistant. Classify the candidate's response. JSON only, no markdown."},
+                {"role": "system", "content": "Interview assistant. Classify the candidate's response. JSON only, no markdown. Never answer the question when classifying as clarification."},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.1,
             max_tokens=400,
         )
         result = _safe_json(resp.choices[0].message.content)
-        if result.get("type") in ("answer", "clarification", "curiosity"):
-            return result
-        return {"type": "answer"}
+        rtype = result.get("type")
+        if rtype not in ("answer", "clarification", "curiosity"):
+            return {"type": "answer"}
+
+        # ── Post-check: did the "clarification" leak the answer? ──
+        if rtype == "clarification":
+            response = (result.get("response") or "").strip()
+            if not response:
+                return {"type": "answer"}
+            if _looks_like_full_answer(response, current_question):
+                # Replace with a safe generic hint instead of letting it through.
+                result["response"] = _CLARIFY_FALLBACK.get(
+                    language, _CLARIFY_FALLBACK["en"]
+                )
+
+        return result
     except Exception:
         return {"type": "answer"}
 
 
-# Legacy wrappers
+# ─────────────────────────────────────────
+#  Legacy wrappers
+# ─────────────────────────────────────────
+
 def score_answer(answer, question, role, language, question_type="technical",
                  body_language_desc="", tone_desc="") -> dict:
     r = evaluate_and_decide(answer=answer, question=question, role=role,
         language=language, question_type=question_type,
         body_language_desc=body_language_desc, tone_desc=tone_desc)
     return {k: r.get(k) for k in ("score", "strengths", "weaknesses", "skill_match",
-        "communication_score", "final_feedback", "answer_type", "correct_answer")}
+        "communication_score", "final_feedback", "answer_type", "correct_answer", "tip")}
+
 
 def decide_next(question, answer, evaluation, role, language, question_type="technical") -> dict:
     if "action" in evaluation:
@@ -463,7 +579,7 @@ def decide_next(question, answer, evaluation, role, language, question_type="tec
 
 
 # ─────────────────────────────────────────
-#  CV QUESTION GENERATION
+#  CV QUESTION GENERATION (unchanged from v2)
 # ─────────────────────────────────────────
 
 def generate_cv_questions(
@@ -473,14 +589,6 @@ def generate_cv_questions(
     cv_summary: str = "",
     company: str | None = None,
 ) -> list[dict]:
-    """
-    Generate interview questions that probe the candidate's CV.
-    Varies across projects, skills, certifications, and experience.
-    Each question is prefixed with a CV reference.
-
-    Returns list of {"question_text", "question_type", "difficulty", "source"}.
-    NOT saved to the Question table.
-    """
     if language == "ar":
         lang_note = "Generate questions in Arabic."
         prefix_instruction = (
@@ -499,7 +607,6 @@ def generate_cv_questions(
 
     company_note = f"\nTarget company: {company}." if company else ""
 
-    # Pick which CV areas to focus on based on count
     if count == 1:
         focus = "Pick ONE area from: a specific project, a technical skill, a certification, or a work experience entry. Choose randomly."
     elif count == 2:
@@ -535,7 +642,7 @@ Return ONLY a JSON array:
             {"role": "system", "content": "Interview question designer specializing in CV-based probing. You create unique, varied questions each time. Output JSON array only."},
             {"role": "user", "content": prompt},
         ],
-        temperature=0.7,  # higher for variety across sessions
+        temperature=0.7,
     )
 
     data = _safe_json_array(resp.choices[0].message.content or "[]")
@@ -552,10 +659,6 @@ Return ONLY a JSON array:
     return questions
 
 
-# ─────────────────────────────────────────
-#  GENERIC AI QUESTION GENERATION (kept for backward compat)
-# ─────────────────────────────────────────
-
 def generate_ai_questions(
     role: str,
     language: str,
@@ -564,7 +667,6 @@ def generate_ai_questions(
     company: str | None = None,
     cv_summary: str | None = None,
 ) -> list[dict]:
-    """Generate interview questions. If cv_summary is provided, delegates to generate_cv_questions."""
     if cv_summary:
         return generate_cv_questions(role=role, language=language, count=count,
                                      cv_summary=cv_summary, company=company)

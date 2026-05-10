@@ -28,6 +28,17 @@ class Question(Base):
     status: Mapped[str] = mapped_column(String(20), default="approved", nullable=False)  # approved | pending | rejected
     rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # ── NEW: AI quality score (0..100) from validate_and_translate ──
+    # 70+ = approved on submit, 40-69 = pending (community decides),
+    # <40 = rejected. Null for legacy/seed rows.
+    quality_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # ── NEW: Community vote counters. Updated by the votes router.
+    # The Postgres trigger fn_recompute_question_status flips
+    # status when these cross thresholds.
+    upvotes:   Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
+    downvotes: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
+
     # optional: target company
     company: Mapped[str | None] = mapped_column(String(150), nullable=True)
 
