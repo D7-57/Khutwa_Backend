@@ -1,7 +1,6 @@
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import func
 
 from app.core.security import get_current_user_id
 from app.db.session import get_db
@@ -25,7 +24,32 @@ from app.services.career.prompts import QUESTION_LABELS
 router = APIRouter(prefix="/career/roles", tags=["career-roles"])
 
 
-# ── GET /career/roles/questionnaire-options ──
+# ── Domain names allowed in the AI detect flow ────────────────────────────────
+# "UX & Design" is excluded — the platform supports IT, Engineering, Business only.
+# This list contains DOMAIN-level names (role_type == "domain"), not field names.
+_SUPPORTED_DETECT_DOMAINS = frozenset({
+    # ── IT ──
+    "Software Engineering",
+    "Data & AI",
+    "Cybersecurity",
+    "Networking & Cloud",
+    "Information Systems & Business",
+    # ── Engineering ──
+    "Industrial Engineering",
+    "Petroleum Engineering",
+    "Chemical Engineering",
+    "Mechanical Engineering",
+    "Civil Engineering",
+    # ── Business ──
+    "Business Administration",
+    "Accounting",
+    "Finance",
+    "Economics",
+    "Management Information Systems",
+})
+
+
+# ── GET /career/roles/questionnaire-options ───────────────────────────────────
 # Returns the MCQ structure so the frontend doesn't hardcode labels.
 
 @router.get("/questionnaire-options")
@@ -82,7 +106,7 @@ def get_questionnaire_options():
     }
 
 
-# Option key sets for filtering
+# Question option key groups
 _Q1_KEYS = {
     "writing_communicating", "analyzing_data", "building_coding",
     "designing_visuals", "helping_advising", "managing_organizing",
@@ -102,7 +126,7 @@ _Q4_KEYS = {
     "job_stability", "clear_career_ladder",
 }
 
-# Arabic labels
+# Arabic labels for questionnaire options
 _AR = {
     "writing_communicating":    "الكتابة والتواصل",
     "analyzing_data":           "تحليل البيانات والأرقام",
@@ -128,45 +152,125 @@ _AR = {
 }
 
 
-# ── GET /career/roles/tree ──
-# Returns top-level fields with their child specializations.
-
+# ── GET /career/roles/tree ────────────────────────────────────────────────────
+# Returns domain-level nodes with their selectable child roles.
+# The top-level fields (IT / Engineering / Business) are not included
+# here to keep the response backward-compatible with the existing frontend
+# catalog builder. Use GET /career/roles/fields for the field list.
 
 @router.get("/tree", response_model=list[RoleTreeNode])
 def get_role_tree(db: Session = Depends(get_db)):
-    # get all roles ordered by name
-    all_roles = db.query(Role).order_by(Role.name).all()
+    domains = (
+        db.query(Role)
+        .filter(Role.role_type == "domain")
+        .order_by(Role.name)
+        .all()
+    )
+    domain_ids = [d.id for d in domains]
 
-    # separate parents (parent_id IS NULL) and children
-    parents = [r for r in all_roles if r.parent_id is None]
+    leaf_roles = (
+        db.query(Role)
+        .filter(Role.role_type == "role", Role.parent_id.in_(domain_ids))
+        .order_by(Role.name)
+        .all()
+    )
+
     children_map: dict[UUID, list[Role]] = {}
-    for r in all_roles:
-        if r.parent_id is not None:
-            children_map.setdefault(r.parent_id, []).append(r)
+    for r in leaf_roles:
+        children_map.setdefault(r.parent_id, []).append(r)
+
+    # Resolve parent field names in one query
+    field_ids = {d.parent_id for d in domains if d.parent_id}
+    fields_map: dict[UUID, Role] = {
+        f.id: f
+        for f in db.query(Role).filter(Role.id.in_(field_ids)).all()
+    }
 
     return [
         RoleTreeNode(
-            id=p.id,
-            name=p.name,
-            description=p.description,
+            id=d.id,
+            name=d.name,
+            name_en=d.name_en,
+            name_ar=d.name_ar,
+            description=d.description,
+            role_type=d.role_type,
+            field_name=fields_map[d.parent_id].name if d.parent_id in fields_map else None,
             children=[
-                RoleChild(id=c.id, name=c.name, description=c.description)
-                for c in children_map.get(p.id, [])
+                RoleChild(
+                    id=c.id,
+                    name=c.name,
+                    name_en=c.name_en,
+                    name_ar=c.name_ar,
+                    description=c.description,
+                    role_type=c.role_type,
+                )
+                for c in children_map.get(d.id, [])
             ],
         )
-        for p in parents
+        for d in domains
     ]
 
 
-# ── GET /career/roles  (flat list, optional ?parent_id= filter) ──
+# ── GET /career/roles/fields ──────────────────────────────────────────────────
+# Returns the three top-level fields with their domain children
+# (full 3-level tree for richer frontends / admin use).
 
+@router.get("/fields", response_model=list[RoleTreeNode])
+def get_role_fields(db: Session = Depends(get_db)):
+    fields = (
+        db.query(Role)
+        .filter(Role.role_type == "field")
+        .order_by(Role.name)
+        .all()
+    )
+    field_ids = [f.id for f in fields]
+
+    domains = (
+        db.query(Role)
+        .filter(Role.role_type == "domain", Role.parent_id.in_(field_ids))
+        .order_by(Role.name)
+        .all()
+    )
+
+    domains_by_field: dict[UUID, list[Role]] = {}
+    for d in domains:
+        domains_by_field.setdefault(d.parent_id, []).append(d)
+
+    return [
+        RoleTreeNode(
+            id=f.id,
+            name=f.name,
+            name_en=f.name_en,
+            name_ar=f.name_ar,
+            description=f.description,
+            role_type=f.role_type,
+            children=[
+                RoleChild(
+                    id=d.id,
+                    name=d.name,
+                    name_en=d.name_en,
+                    name_ar=d.name_ar,
+                    description=d.description,
+                    role_type=d.role_type,
+                )
+                for d in domains_by_field.get(f.id, [])
+            ],
+        )
+        for f in fields
+    ]
+
+
+# ── GET /career/roles  (flat list, optional ?role_type= filter) ───────────────
 
 @router.get("", response_model=list[RoleOut])
 def list_roles(
+    role_type: str | None = None,
     parent_id: str | None = None,
     db: Session = Depends(get_db),
 ):
     q = db.query(Role)
+    if role_type is not None:
+        q = q.filter(Role.role_type == role_type)
     if parent_id is not None:
         try:
             pid = UUID(parent_id)
@@ -176,8 +280,7 @@ def list_roles(
     return q.order_by(Role.name).all()
 
 
-# ── GET /career/roles/{role_id} ──
-
+# ── GET /career/roles/{role_id} ───────────────────────────────────────────────
 
 @router.get("/{role_id}", response_model=RoleOut)
 def get_role(role_id: str, db: Session = Depends(get_db)):
@@ -191,9 +294,7 @@ def get_role(role_id: str, db: Session = Depends(get_db)):
     return role
 
 
-# ── GET /career/roles/{role_id}/skills ──
-# What skills does this role require?
-
+# ── GET /career/roles/{role_id}/skills ────────────────────────────────────────
 
 @router.get("/{role_id}/skills", response_model=list[RoleSkillOut])
 def get_role_skills(role_id: str, db: Session = Depends(get_db)):
@@ -224,8 +325,7 @@ def get_role_skills(role_id: str, db: Session = Depends(get_db)):
     ]
 
 
-# ── GET /career/roles/me  (user's selected roles) ──
-
+# ── GET /career/roles/me/selected ─────────────────────────────────────────────
 
 @router.get("/me/selected", response_model=list[UserRoleOut])
 def get_my_roles(
@@ -244,6 +344,7 @@ def get_my_roles(
             id=ur.id,
             role_id=ur.role_id,
             role_name=r.name,
+            role_name_ar=r.name_ar,
             confidence=ur.confidence,
             source=ur.source,
             is_primary=ur.is_primary,
@@ -252,8 +353,7 @@ def get_my_roles(
     ]
 
 
-# ── POST /career/roles/me  (set / add a role) ──
-
+# ── POST /career/roles/me/selected ────────────────────────────────────────────
 
 @router.post("/me/selected", response_model=UserRoleOut, status_code=201)
 def set_my_role(
@@ -262,21 +362,15 @@ def set_my_role(
     db: Session = Depends(get_db),
 ):
     uid = UUID(user_id)
-
     role = db.get(Role, body.role_id)
     if not role:
         raise HTTPException(status_code=404, detail="Role not found")
 
-    # if this is a parent-level field, reject — user must pick a specialization
-    has_children = (
-        db.query(func.count(Role.id))
-        .filter(Role.parent_id == body.role_id)
-        .scalar()
-    )
-    if has_children:
+    # Only leaf roles (role_type == "role") are selectable
+    if role.role_type != "role":
         raise HTTPException(
             status_code=400,
-            detail="Please select a specific specialization, not a broad field.",
+            detail="Please select a specific job role, not a field or domain category.",
         )
 
     existing = (
@@ -293,12 +387,12 @@ def set_my_role(
             id=existing.id,
             role_id=existing.role_id,
             role_name=role.name,
+            role_name_ar=role.name_ar,
             confidence=existing.confidence,
             source=existing.source,
             is_primary=existing.is_primary,
         )
 
-    # unset any existing primary
     db.query(UserRole).filter(
         UserRole.user_id == uid, UserRole.is_primary == True
     ).update({"is_primary": False})
@@ -318,14 +412,14 @@ def set_my_role(
         id=ur.id,
         role_id=ur.role_id,
         role_name=role.name,
+        role_name_ar=role.name_ar,
         confidence=ur.confidence,
         source=ur.source,
         is_primary=ur.is_primary,
     )
 
 
-# ── PUT /career/roles/me/selected/bulk  (replace all – for onboarding) ──
-
+# ── PUT /career/roles/me/selected/bulk ───────────────────────────────────────
 
 @router.put("/me/selected/bulk", response_model=list[UserRoleOut])
 def bulk_set_my_roles(
@@ -336,17 +430,14 @@ def bulk_set_my_roles(
     uid = UUID(user_id)
 
     if len(body.roles) > 3:
-        raise HTTPException(
-            status_code=400,
-            detail="Maximum 3 roles allowed.",
-        )
+        raise HTTPException(status_code=400, detail="Maximum 3 roles allowed.")
 
-    # validate all role IDs and reject parent-level fields
     role_ids = [r.role_id for r in body.roles]
     roles_map = {
         r.id: r
         for r in db.query(Role).filter(Role.id.in_(role_ids)).all()
     }
+
     missing = set(role_ids) - set(roles_map.keys())
     if missing:
         raise HTTPException(
@@ -354,22 +445,16 @@ def bulk_set_my_roles(
             detail=f"Roles not found: {[str(m) for m in missing]}",
         )
 
-    for rid in role_ids:
-        has_children = (
-            db.query(func.count(Role.id))
-            .filter(Role.parent_id == rid)
-            .scalar()
-        )
-        if has_children:
+    # Only leaf roles are selectable
+    for rid, role in roles_map.items():
+        if role.role_type != "role":
             raise HTTPException(
                 status_code=400,
-                detail=f"Role '{roles_map[rid].name}' is a broad field. Pick a specialization.",
+                detail=f"'{role.name}' is a {role.role_type}, not a selectable job role.",
             )
 
-    # delete old
     db.query(UserRole).filter(UserRole.user_id == uid).delete()
 
-    # insert new – first one is primary
     results = []
     for i, item in enumerate(body.roles):
         ur = UserRole(
@@ -387,6 +472,7 @@ def bulk_set_my_roles(
                 id=ur.id,
                 role_id=ur.role_id,
                 role_name=role.name,
+                role_name_ar=role.name_ar,
                 confidence=ur.confidence,
                 source=ur.source,
                 is_primary=ur.is_primary,
@@ -397,8 +483,7 @@ def bulk_set_my_roles(
     return results
 
 
-# ── DELETE /career/roles/me/{role_id} ──
-
+# ── DELETE /career/roles/me/selected/{role_id} ───────────────────────────────
 
 @router.delete("/me/selected/{role_id}", status_code=204)
 def remove_my_role(
@@ -422,8 +507,7 @@ def remove_my_role(
     db.commit()
 
 
-# ── POST /career/roles/detect  (AI-powered role suggestion) ──
-
+# ── POST /career/roles/detect ─────────────────────────────────────────────────
 
 @router.post("/detect", response_model=RoleDetectResponse)
 def detect_role(
@@ -437,13 +521,55 @@ def detect_role(
             detail="Provide questionnaire answers, a chat message, or CV context.",
         )
 
-    # fetch available roles for the AI to choose from
-    all_roles = db.query(Role).filter(Role.parent_id.isnot(None)).all()
+    # Fetch only leaf roles whose domain is in the supported set.
+    # UX & Design is excluded since it is not in _SUPPORTED_DETECT_DOMAINS.
+    supported_domains = (
+        db.query(Role)
+        .filter(
+            Role.role_type == "domain",
+            Role.name.in_(_SUPPORTED_DETECT_DOMAINS),
+        )
+        .all()
+    )
+    supported_domain_ids = {d.id for d in supported_domains}
+
+    all_roles = (
+        db.query(Role)
+        .filter(
+            Role.role_type == "role",
+            Role.parent_id.in_(supported_domain_ids),
+        )
+        .all()
+    )
+
     if not all_roles:
         raise HTTPException(
             status_code=500,
             detail="No roles configured in the system yet.",
         )
+
+    # If the user explicitly selected a field (IT / Engineering / Business),
+    # narrow the catalog to that field's domains for tighter suggestions.
+    if body.context and (field_name := body.context.get("field")):
+        field_row = (
+            db.query(Role)
+            .filter(Role.role_type == "field", Role.name == field_name)
+            .first()
+        )
+        if field_row:
+            field_domain_ids = {
+                d.id
+                for d in db.query(Role)
+                .filter(Role.role_type == "domain", Role.parent_id == field_row.id)
+                .all()
+            }
+            all_roles = [r for r in all_roles if r.parent_id in field_domain_ids]
+
+        if not all_roles:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No roles found for field '{field_name}'.",
+            )
 
     return detect_roles(
         roles=all_roles,

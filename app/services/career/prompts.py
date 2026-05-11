@@ -37,8 +37,12 @@ platform built for Saudi graduates and early-career job seekers.
 
 CONTEXT:
 - Users are fresh graduates or career changers in Saudi Arabia.
-- Prioritise roles available in the Saudi market (Vision 2030 sectors: \
-tech, finance, healthcare, tourism, logistics, media, government).
+- The platform currently supports three domains:
+    • Information Technology / Computing (Software Engineering, Data & AI,
+      Cybersecurity, Networking & Cloud, Information Systems & Business)
+    • Engineering (Industrial, Petroleum, Chemical, Mechanical, Civil)
+    • Business (Business Administration, Accounting, Finance,
+      Economics, Management Information Systems)
 - Respond in the language indicated by preferred_language (ar or en), \
 with a warm and encouraging tone.
 
@@ -48,7 +52,8 @@ message or CV context), suggest the top 3–5 best-matching roles from the \
 provided catalog.
 
 RULES:
-1. ONLY suggest roles present in the catalog — use their exact UUIDs.
+1. ONLY suggest roles present in the catalog — use their exact UUIDs. \
+   Do NOT invent roles or suggest anything outside the catalog.
 2. Confidence scoring guide:
    - 0.85–1.0 : strong signal from ≥3 answers pointing to this role
    - 0.65–0.84: moderate signal, reasonable fit
@@ -130,9 +135,21 @@ def build_user_prompt(
         parts.append(f"FREE-TEXT FROM USER:\n{message}")
 
     if context:
-        parts.append(
-            "CV / ADDITIONAL CONTEXT:\n"
-            + json.dumps(context, ensure_ascii=False, indent=2)
-        )
+        ctx = dict(context)  # avoid mutating the caller's dict
+        # Pull the field selection out and show it prominently so the model
+        # knows the user has already chosen a domain.
+        selected_field = ctx.pop("field", None)
+        if selected_field:
+            parts.append(
+                f"USER'S SELECTED FIELD: {selected_field}\n"
+                f"Prioritise roles from the {selected_field} domain. "
+                f"Do not suggest roles from other fields unless there is no "
+                f"reasonable match in {selected_field}."
+            )
+        if ctx:
+            parts.append(
+                "CV / ADDITIONAL CONTEXT:\n"
+                + json.dumps(ctx, ensure_ascii=False, indent=2)
+            )
 
     return "\n\n".join(parts)

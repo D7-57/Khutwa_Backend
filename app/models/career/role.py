@@ -16,8 +16,21 @@ class Role(Base):
         primary_key=True,
         default=uuid.uuid4,
     )
+
+    # ── English name (canonical, also kept in `name` for backward compat) ──
     name: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
+    name_en: Mapped[str] = mapped_column(String(120), nullable=False)
+    name_ar: Mapped[str] = mapped_column(String(120), nullable=False)
+
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # ── Hierarchy type ──────────────────────────────────────────────────────
+    # "field"  → root category with parent_id IS NULL  (IT, Engineering, Business)
+    # "domain" → mid-level grouping                    (Software Engineering, Finance)
+    # "role"   → selectable job title                  (Frontend Developer, Accountant)
+    role_type: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="role"
+    )
 
     parent_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
@@ -30,6 +43,7 @@ class Role(Base):
         server_default=func.now(),
         nullable=False,
     )
+
 
 import uuid
 from datetime import datetime

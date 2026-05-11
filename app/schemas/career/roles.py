@@ -5,23 +5,31 @@ from typing import Optional
 from app.schemas.career.questionnaire import QuestionnaireAnswers
 
 
-# ── role tree ──
+# ── role tree ──────────────────────────────────────────────────────────────────
 
 
 class RoleChild(BaseModel):
+    """A selectable leaf role inside a domain."""
     id: UUID
     name: str
+    name_en: str
+    name_ar: str
     description: str | None = None
+    role_type: str = "role"
 
     class Config:
         from_attributes = True
 
 
 class RoleTreeNode(BaseModel):
-    """A parent field with its child specializations."""
+    """A domain (mid-level) with its child leaf roles."""
     id: UUID
     name: str
+    name_en: str
+    name_ar: str
     description: str | None = None
+    role_type: str = "domain"
+    field_name: str | None = None   # parent field: 'Information Technology' | 'Engineering' | 'Business'
     children: list[RoleChild] = []
 
     class Config:
@@ -31,20 +39,23 @@ class RoleTreeNode(BaseModel):
 class RoleOut(BaseModel):
     id: UUID
     name: str
+    name_en: str
+    name_ar: str
     description: str | None = None
+    role_type: str
     parent_id: UUID | None = None
 
     class Config:
         from_attributes = True
 
 
-# ── user role selection ──
+# ── user role selection ────────────────────────────────────────────────────────
 
 
 class UserRoleSet(BaseModel):
     """User picks (or AI suggests) a role."""
     role_id: UUID
-    source: str = "manual"  # manual | questionnaire | chatbot
+    source: str = "manual"    # manual | questionnaire | chatbot | cv
     confidence: float = 1.0
 
 
@@ -57,6 +68,7 @@ class UserRoleOut(BaseModel):
     id: UUID
     role_id: UUID
     role_name: str
+    role_name_ar: str
     confidence: float
     source: str
     is_primary: bool
@@ -65,14 +77,14 @@ class UserRoleOut(BaseModel):
         from_attributes = True
 
 
-# ── role detection (AI) ──
+# ── role detection (AI) ────────────────────────────────────────────────────────
 
 
 class RoleDetectRequest(BaseModel):
     """Accepts either structured questionnaire answers or free-text."""
     answers: QuestionnaireAnswers | None = None
-    message: str | None = None   # free-text chatbot message
-    context: dict | None = None  # optional extra context (CV, major, etc.)
+    message: str | None = None    # free-text chatbot message
+    context: dict | None = None   # optional extra context (CV, major, etc.)
 
 
 class RoleSuggestion(BaseModel):
