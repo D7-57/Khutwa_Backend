@@ -101,6 +101,10 @@ def get_roadmap_full(roadmap: UserRoadmap, db: Session) -> dict:
         "is_ai_generated": roadmap.is_ai_generated,
         "overall_progress": roadmap.overall_progress,
         "created_at": roadmap.created_at,
+        # Per-roadmap generation context — surfaced so the UI can show
+        # a "Focused on: X" badge and pre-fill the Regenerate sheet.
+        "skill_focus": roadmap.skill_focus,
+        "include_tangible_outcome": roadmap.include_tangible_outcome,
         "stages": [
             {
                 "id": s.id,
@@ -140,15 +144,33 @@ def generate_roadmap(
     role_id_override: UUID | None = None,
     force_ai: bool = False,
     language: str = "en",
+    # ── Task 1: Custom Skill Input ──────────────────────────────────────
+    skill_focus: str | None = None,
+    # ── Task 5: Tangible Outcomes ───────────────────────────────────────
+    include_tangible_outcome: bool = False,
 ) -> dict:
     """
     Generate a roadmap for the user.
     - Max 3 roadmaps per user.
     - One roadmap per role — if a roadmap for this role already exists, replace it.
+
+    Privacy gating (PDPL):
+      If profile.privacy_settings.roadmap_personalization is OFF, the
+      user has not consented to skill-derived personalization. We:
+        - DO NOT query UserSkill (no skill-gap computation)
+        - DO NOT summarize previous roadmaps (no behavioural inference)
+        - Still respect role + skill_focus + include_tangible_outcome
+          (these are explicit per-request inputs, not derived data)
+      This is the "soft gate" — generation still works, just with
+      less context. Users see a working app instead of a 403.
     """
     profile = db.get(Profile, user_id)
     if not profile:
         raise ValueError("Profile not found")
+
+    # ── PDPL: check roadmap_personalization consent ─────────────────────
+    privacy_settings = profile.privacy_settings or {}
+    personalize = bool(privacy_settings.get("roadmap_personalization"))
 
     # ── Resolve target role ─────────────────────────────
     role, role_id = _resolve_role(user_id, db, role_id_override)
@@ -166,10 +188,21 @@ def generate_roadmap(
         oldest = existing[-1]  # list is newest-first, so last = oldest
         _delete_single_roadmap(oldest, db)
 
-    # ── Decide strategy ─────────────────────────────────
-    existing_skills, gap_skills, existing_names, gap_names = _compute_skill_gap(
-        user_id, role.id, db,
-    )
+    # ── Skill-gap analysis (privacy-gated) ──────────────
+    if personalize:
+        existing_skills, gap_skills, existing_names, gap_names = (
+            _compute_skill_gap(user_id, role.id, db)
+        )
+        # Task 4: also gather what previous roadmaps covered, so the
+        # prompt can avoid repeating tasks that were already taught.
+        previously_covered = _summarize_previous_roadmaps(user_id, role.id, db)
+    else:
+        # No personalization — pretend the user has no recorded skills
+        # and no roadmap history. Generation falls back to "everything
+        # needed for the role" + whatever the user explicitly typed
+        # into skill_focus.
+        existing_skills, gap_skills, existing_names, gap_names = [], [], [], []
+        previously_covered = []
 
     template = (
         db.query(RoadmapTemplate)
@@ -177,13 +210,22 @@ def generate_roadmap(
         .first()
     )
 
-    if force_ai or (gap_names and not template):
+    # When the user provided an explicit skill_focus OR asked for a
+    # tangible outcome, we ALWAYS go AI — templates can't honor those.
+    user_provided_extras = bool(
+        (skill_focus and skill_focus.strip()) or include_tangible_outcome
+    )
+
+    if force_ai or user_provided_extras or (gap_names and not template):
         roadmap_data = _generate_with_ai(
             role=role,
             profile=profile,
             existing_names=existing_names,
             gap_names=gap_names,
             language=language,
+            skill_focus=skill_focus,
+            include_tangible_outcome=include_tangible_outcome,
+            previously_covered_skills=previously_covered,
         )
         source = "ai"
         is_ai = True
@@ -202,6 +244,9 @@ def generate_roadmap(
             existing_names=existing_names,
             gap_names=gap_names,
             language=language,
+            skill_focus=skill_focus,
+            include_tangible_outcome=include_tangible_outcome,
+            previously_covered_skills=previously_covered,
         )
         source = "ai"
         is_ai = True
@@ -218,6 +263,10 @@ def generate_roadmap(
         is_ai=is_ai,
         stages_data=roadmap_data.get("stages", []),
         db=db,
+        # Store the generation context on the row so /regenerate can
+        # inherit it and the UI can render badges.
+        skill_focus=(skill_focus.strip() if skill_focus and skill_focus.strip() else None),
+        include_tangible_outcome=include_tangible_outcome,
     )
 
     db.commit()
@@ -228,6 +277,7 @@ def generate_roadmap(
         "source": source,
         "skill_gap": gap_names,
         "skills_matched": existing_names,
+        "previously_covered_skills": previously_covered,
     }
 
 
@@ -417,6 +467,81 @@ def _compute_skill_gap(
     return existing, gap, existing_names, gap_names
 
 
+def _summarize_previous_roadmaps(
+    user_id: UUID, role_id: UUID, db: Session,
+) -> list[str]:
+    """
+    Task 4 — Skill Gap Analysis.
+
+    Returns a deduplicated list of skill names that appeared in the
+    user's previous roadmaps. The prompt uses this to avoid
+    re-teaching the same skills the same way.
+
+    We look at ALL of the user's roadmaps (not just the current role's)
+    because skills overlap between roles. e.g. "Python" learned for
+    Data Analyst is still Python when they switch to ML Engineer.
+
+    Returned skill names come from completed_at-ranked tasks first:
+    a skill the user has MARKED COMPLETE in a past roadmap is much
+    stronger evidence of mastery than one they enrolled in but
+    didn't finish. We pass completed-skill names ahead of
+    enrolled-but-incomplete ones, and cap the total at 30 to keep the
+    prompt size sane.
+
+    Caveat (spec note): we rely on the user's self-reported task
+    completion. If the user marked things complete without actually
+    learning them, this signal is noisy. The prompt instructs the
+    model to treat these as "lower priority" rather than "skip
+    entirely" for exactly this reason.
+    """
+    user_roadmaps = (
+        db.query(UserRoadmap)
+        .filter(UserRoadmap.user_id == user_id)
+        .all()
+    )
+    if not user_roadmaps:
+        return []
+
+    roadmap_ids = [rm.id for rm in user_roadmaps]
+    stage_rows = (
+        db.query(RoadmapStage)
+        .filter(RoadmapStage.roadmap_id.in_(roadmap_ids))
+        .all()
+    )
+    if not stage_rows:
+        return []
+
+    stage_ids = [s.id for s in stage_rows]
+    tasks = (
+        db.query(RoadmapTask)
+        .filter(RoadmapTask.stage_id.in_(stage_ids))
+        .all()
+    )
+
+    completed_skills: list[str] = []
+    other_skills: list[str] = []
+    for t in tasks:
+        if not t.skill_name:
+            continue
+        if t.is_completed:
+            completed_skills.append(t.skill_name)
+        else:
+            other_skills.append(t.skill_name)
+
+    # Dedup preserving order: completed first (stronger signal), then others.
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for name in completed_skills + other_skills:
+        key = name.strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            ordered.append(name.strip())
+        if len(ordered) >= 30:  # prompt-size guard
+            break
+
+    return ordered
+
+
 def _delete_single_roadmap(rm: UserRoadmap, db: Session):
     """Delete one roadmap and its stages/tasks."""
     stages = (
@@ -448,6 +573,10 @@ def _generate_with_ai(
     existing_names: list[str],
     gap_names: list[str],
     language: str = "en",
+    *,
+    skill_focus: str | None = None,
+    include_tangible_outcome: bool = False,
+    previously_covered_skills: list[str] | None = None,
 ) -> dict:
     profile_context = {}
     if profile.major:
@@ -465,6 +594,9 @@ def _generate_with_ai(
         gap_skills=gap_names if gap_names else [f"Core skills for {role.name}"],
         profile_context=profile_context or None,
         language=language,
+        skill_focus=skill_focus,
+        include_tangible_outcome=include_tangible_outcome,
+        previously_covered_skills=previously_covered_skills or [],
     )
 
     try:
@@ -535,6 +667,9 @@ def _persist_roadmap(
     is_ai: bool,
     stages_data: list[dict],
     db: Session,
+    *,
+    skill_focus: str | None = None,
+    include_tangible_outcome: bool = False,
 ) -> UserRoadmap:
     roadmap = UserRoadmap(
         user_id=user_id,
@@ -544,6 +679,8 @@ def _persist_roadmap(
         source=source,
         is_ai_generated=is_ai,
         overall_progress=0.0,
+        skill_focus=skill_focus,
+        include_tangible_outcome=include_tangible_outcome,
     )
     db.add(roadmap)
     db.flush()

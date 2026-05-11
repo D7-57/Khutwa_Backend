@@ -72,6 +72,18 @@ class UserRoadmap(Base):
         Float, default=0.0, nullable=False,
     )
 
+    # ── NEW: per-roadmap generation context ───────────────────────────
+    # Stored so the "Regenerate" button can default to the same options
+    # the user picked last time, and so future Skill Gap Analysis can
+    # see what each previous roadmap was explicitly focused on.
+    skill_focus: Mapped[str | None] = mapped_column(
+        String(500), nullable=True,
+    )
+    include_tangible_outcome: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False,
+        server_default="false",
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False,
     )

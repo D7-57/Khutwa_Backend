@@ -6,7 +6,12 @@ from sqlalchemy.orm import Session
 from app.core.security import get_current_user_id
 from app.db.session import get_db
 from app.models.career.role import Role
-from app.models.roadmap.models import RoadmapTemplate, UserRoadmap, RoadmapStage
+from app.models.roadmap.models import (
+    RoadmapTemplate,
+    UserRoadmap,
+    RoadmapStage,
+    RoadmapTask,
+)
 from app.schemas.roadmap.schemas import (
     RoadmapOut,
     RoadmapSummary,
@@ -68,16 +73,14 @@ def list_my_roadmaps(
             .filter(RoadmapStage.roadmap_id == rm.id)
             .count()
         )
-        # Quick task count via stages
         stages = (
             db.query(RoadmapStage)
             .filter(RoadmapStage.roadmap_id == rm.id)
             .all()
         )
         task_count = 0
-        from app.models.roadmap.models import RoadmapTask as RT
         for s in stages:
-            task_count += db.query(RT).filter(RT.stage_id == s.id).count()
+            task_count += db.query(RoadmapTask).filter(RoadmapTask.stage_id == s.id).count()
 
         result.append(
             RoadmapSummary(
@@ -92,6 +95,9 @@ def list_my_roadmaps(
                 stage_count=stage_count,
                 task_count=task_count,
                 created_at=rm.created_at,
+                # NEW: surface generation context for list badges.
+                skill_focus=rm.skill_focus,
+                include_tangible_outcome=rm.include_tangible_outcome,
             )
         )
     return result
@@ -115,6 +121,10 @@ def generate_my_roadmap(
             role_id_override=body.role_id if body else None,
             force_ai=body.force_ai if body else False,
             language=body.language if body else "en",
+            skill_focus=body.skill_focus if body else None,
+            include_tangible_outcome=(
+                body.include_tangible_outcome if body else False
+            ),
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -125,6 +135,14 @@ def generate_my_roadmap(
 
 
 # ── POST /roadmap/me/regenerate ──
+#
+# Same as /generate but with one piece of UX glue: if the user didn't
+# explicitly set skill_focus or include_tangible_outcome in this request,
+# we inherit them from the existing roadmap for the same role. That
+# gives the frontend a sensible default (the user usually wants to
+# re-roll the same kind of roadmap, not start over from scratch).
+# The client can override either by sending the new value, or send an
+# empty string for skill_focus to explicitly clear it.
 
 
 @router.post("/me/regenerate", response_model=RoadmapGenerateResponse)
@@ -135,13 +153,51 @@ def regenerate_my_roadmap(
 ):
     uid = UUID(user_id)
 
+    # Determine which role we're regenerating for, then look up the
+    # current roadmap (if any) to inherit defaults.
+    role_id_override = body.role_id if body else None
+
+    inherited_focus: str | None = None
+    inherited_tangible: bool = False
+    if role_id_override:
+        existing = (
+            db.query(UserRoadmap)
+            .filter(
+                UserRoadmap.user_id == uid,
+                UserRoadmap.role_id == role_id_override,
+            )
+            .first()
+        )
+        if existing:
+            inherited_focus = existing.skill_focus
+            inherited_tangible = existing.include_tangible_outcome
+
+    # Inheritance logic:
+    #   - skill_focus: if the client explicitly sent a value (including
+    #     an empty string, meaning "clear focus"), use that. Only
+    #     inherit when the field was not sent.
+    #   - include_tangible_outcome: same — only inherit when the client
+    #     defaulted to False AND we have a stronger prior. We use
+    #     model_fields_set to distinguish "explicitly False" from "default".
+    skill_focus = inherited_focus
+    include_tangible_outcome = inherited_tangible
+
+    if body is not None:
+        sent = body.model_fields_set
+        if "skill_focus" in sent:
+            skill_focus = body.skill_focus
+        if "include_tangible_outcome" in sent:
+            include_tangible_outcome = body.include_tangible_outcome
+
     try:
         result = generate_roadmap(
             user_id=uid,
             db=db,
-            role_id_override=body.role_id if body else None,
+            role_id_override=role_id_override,
             force_ai=body.force_ai if body else False,
             language=body.language if body else "en",
+            skill_focus=skill_focus,
+            include_tangible_outcome=include_tangible_outcome,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
