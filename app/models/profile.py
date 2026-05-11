@@ -8,6 +8,42 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.db.base import Base
 
 
+# ───────────────────────────────────────────────────────────────────
+#  PRIVACY DEFAULT — shape of profiles.privacy_settings (JSONB)
+# ───────────────────────────────────────────────────────────────────
+#
+# All three personalization toggles default OFF (PDPL: consent must be
+# explicit + opt-in). Terms must be accepted separately via the
+# /auth/me/privacy/accept-terms endpoint, which records the version,
+# timestamp, and IP for audit purposes.
+#
+# Each consent key tracks its own updated_at so we can prove WHEN
+# consent was given/revoked — required for PDPL compliance evidence.
+
+CURRENT_TERMS_VERSION = "v1"
+
+
+def _privacy_default() -> dict:
+    return {
+        # ── Terms / Privacy Policy acceptance (legal basis: contract) ──
+        "terms_accepted": False,
+        "terms_accepted_version": None,   # which version they accepted
+        "terms_accepted_at": None,        # ISO timestamp
+        "terms_accepted_ip": None,        # IP at time of acceptance
+
+        # ── Optional consent toggles (legal basis: explicit consent) ──
+        # Each toggle has: on/off + when it was last changed.
+        "interview_personalization": False,
+        "interview_personalization_updated_at": None,
+
+        "roadmap_personalization": False,
+        "roadmap_personalization_updated_at": None,
+
+        "cv_storage": False,
+        "cv_storage_updated_at": None,
+    }
+
+
 class Profile(Base):
     __tablename__ = "profiles"
 
@@ -30,8 +66,7 @@ class Profile(Base):
     linkedin_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
     github_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
-    # NEW: categorical bucket — one of "0", "<1", "1", "2", "3+".
-    # Stored as a String because "<1" and "3+" don't map cleanly to a single integer.
+    # categorical bucket — one of "0", "<1", "1", "2", "3+".
     years_of_experience: Mapped[str | None] = mapped_column(String(10), nullable=True)
 
     # JSON fields for MVP
@@ -39,6 +74,16 @@ class Profile(Base):
     languages: Mapped[list] = mapped_column(JSONB, default=list, nullable=True)
     projects: Mapped[list] = mapped_column(JSONB, default=list, nullable=True)
     experiences: Mapped[list] = mapped_column(JSONB, default=list, nullable=True)
+
+    # ── PDPL privacy / consent settings ──
+    # Single JSONB column so migrations stay cheap as the consent model
+    # evolves. See _privacy_default() above for the shape.
+    privacy_settings: Mapped[dict] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=_privacy_default,
+        server_default="{}",  # existing rows get {} on migration; app backfills
+    )
 
     # onboarding tracking
     onboarding_complete: Mapped[bool] = mapped_column(default=False, nullable=False, server_default="false")

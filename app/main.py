@@ -14,10 +14,12 @@ from app.routers.cv_quiz import router as cv_quiz_router
 from app.routers.cv_dir.builder import router as cv_builder_router
 
 
-# ── new organized routers ──
+# ── auth / profile / privacy / account ──
 from app.routers.auth.profile import router as auth_profile_router
 from app.routers.auth.skills import router as auth_skills_router
 from app.routers.auth.onboarding_cv import router as onboarding_cv_router
+from app.routers.auth.privacy import router as auth_privacy_router
+from app.routers.auth.account import router as auth_account_router  # NEW
 from app.routers.career.roles import router as career_roles_router
 from app.routers.career.skills import router as career_skills_router
 from app.routers.roadmap.roadmap import router as roadmap_router
@@ -41,6 +43,8 @@ app.include_router(health_router)
 app.include_router(auth_profile_router)
 app.include_router(auth_skills_router)
 app.include_router(onboarding_cv_router)
+app.include_router(auth_privacy_router)
+app.include_router(auth_account_router)  # NEW — delete data / delete account / contact update
 
 # career catalog
 app.include_router(career_roles_router)

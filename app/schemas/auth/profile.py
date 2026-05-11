@@ -2,6 +2,8 @@ from pydantic import BaseModel, Field, field_validator
 from uuid import UUID
 from datetime import datetime
 
+from app.schemas.auth.privacy import PrivacySettingsOut
+
 
 # Allowed buckets for years_of_experience.
 # Kept as strings because "<1" and "3+" don't map cleanly to a single integer.
@@ -58,7 +60,7 @@ class ProfileOut(BaseModel):
     graduation_year: int | None = None
     current_status: str | None = None  # student | fresh_graduate | job_seeker | employed
 
-    # NEW: one of "0", "<1", "1", "2", "3+"
+    # one of "0", "<1", "1", "2", "3+"
     years_of_experience: str | None = None
 
     # links
@@ -73,6 +75,10 @@ class ProfileOut(BaseModel):
 
     # onboarding progress flag
     onboarding_complete: bool = False
+
+    # PDPL privacy state — included in /auth/me so the client can render
+    # the toggles in Settings without a second round-trip.
+    privacy: PrivacySettingsOut = PrivacySettingsOut()
 
     created_at: datetime | None = None
 
@@ -95,7 +101,6 @@ class ProfileUpdate(BaseModel):
     graduation_year: int | None = None
     current_status: str | None = None
 
-    # NEW
     years_of_experience: str | None = None
 
     linkedin_url: str | None = None
@@ -131,8 +136,42 @@ class OnboardingBasicInfo(BaseModel):
     current_status: str | None = None  # student | fresh_graduate | job_seeker | employed
     language: str = "en"
 
-    # NEW – optional at this step so older clients don't break.
     years_of_experience: str | None = None
+
+    # ── PDPL: terms must be accepted to complete signup ──
+    # This is the "required" checkbox in the signup UI. The three optional
+    # personalization toggles can be set on the same screen via a
+    # subsequent PATCH /auth/me/privacy call (we keep them off this
+    # schema so a client that doesn't include them defaults all-OFF,
+    # which is the PDPL-correct posture).
+    accept_terms: bool = Field(
+        ...,
+        description=(
+            "Must be true. The user has read and agreed to the Terms of "
+            "Service and Privacy Policy. Server records the version + "
+            "timestamp + IP at the moment of signup."
+        ),
+    )
+    terms_version: str = Field(
+        ...,
+        min_length=1,
+        max_length=20,
+        description=(
+            "The version string of the terms the client is presenting. "
+            "Server validates this matches the current version, otherwise "
+            "the client is stale and must refresh before retrying."
+        ),
+    )
+
+    @field_validator("accept_terms")
+    @classmethod
+    def _terms_must_be_true(cls, v: bool) -> bool:
+        if v is not True:
+            raise ValueError(
+                "You must accept the Terms of Service and Privacy Policy "
+                "to use Khutwa."
+            )
+        return v
 
     @field_validator("years_of_experience")
     @classmethod
