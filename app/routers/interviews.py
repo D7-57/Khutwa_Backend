@@ -137,16 +137,36 @@ class StartInterviewRequest(BaseModel):
     is_rapid: bool = False
     # NEW: 'free' | 'focused'
     practice_mode: str = "free"
+    # NEW: 'ar' | 'en' (any of three names accepted from the client, see
+    # /start handler for query-string fallbacks).
+    language: str | None = None
+    interview_language: str | None = None
+    lang: str | None = None
 
 
 @router.post("/start")
 def start_interview(
     body: StartInterviewRequest,
+    # Query-string aliases — kept for backend-version compatibility with older
+    # clients that send language via the URL instead of the body.
+    language: str | None = None,
+    interview_language: str | None = None,
+    lang: str | None = None,
     user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
     uid = UUID(user_id)
-    language = _get_language(db, uid)
+    # Honor an explicit language choice from the client if it parses as ar/en,
+    # otherwise fall through to the user's stored profile language.
+    requested_language = _resolve_requested_language(
+        body.interview_language,
+        body.language,
+        body.lang,
+        interview_language,
+        language,
+        lang,
+    )
+    language = requested_language or _get_language(db, uid)
     profile = db.get(Profile, uid)
     user_name = profile.first_name if profile and profile.first_name else None
 
@@ -284,6 +304,7 @@ def start_interview(
             "prompt_text": pick_intro(language, user_name),
             "questions": all_question_data,
             "config": _config_dict(body, len(all_questions), practice_mode),
+            "language": language,
         }
 
     return {
@@ -292,6 +313,7 @@ def start_interview(
         "prompt_type": "intro",
         "prompt_text": pick_intro(language, user_name),
         "config": _config_dict(body, len(all_questions), practice_mode),
+        "language": language,
     }
 
 
@@ -1277,6 +1299,21 @@ def rapid_submit(
 def _get_language(db: Session, user_id: UUID) -> str:
     p = db.get(Profile, user_id)
     return p.language if p and p.language in ("ar", "en") else "en"
+
+
+def _resolve_requested_language(*values: str | None) -> str | None:
+    """
+    Pick the first 'ar' or 'en' from the candidates, case/whitespace-insensitive.
+
+    Used in /start to honor an explicit choice from the client (sent via any
+    of the query/body keys: language / interview_language / lang) before
+    falling back to the user's profile-stored language.
+    """
+    for raw in values:
+        v = (raw or "").strip().lower()
+        if v in ("ar", "en"):
+            return v
+    return None
 
 
 def _get_followup_max(s: InterviewSession) -> int:
