@@ -13,8 +13,8 @@ You are given:
 1. The target role
 2. Skills they ALREADY have (skip these — don't teach what they know)
 3. Skills they NEED to learn (the gap — focus here)
-4. Skills they were TAUGHT in previous roadmaps (avoid re-teaching unless \
-   their progress shows they haven't actually mastered it)
+4. Skills + specific task titles they were taught in previous roadmaps \
+   (avoid repeating; revisit only at a harder/different angle)
 5. Optional profile context (major, experience level, language)
 6. Optional SPECIFIC FOCUS the user typed (e.g. "Get AWS certified", \
    "Build a React portfolio") — prioritize this when present
@@ -26,28 +26,64 @@ RULES:
 1. Build 4-6 stages, ordered by dependency (foundations first, advanced last).
 2. Each stage has 2-4 tasks with specific, actionable learning activities.
 3. Each task should reference ONE primary skill it teaches (use skill_name).
-4. Resources must be real, well-known platforms (Coursera, Udemy, YouTube, \
-   freeCodeCamp, Khan Academy, MDN, official docs, etc). Use descriptive \
-   titles but you may use placeholder URLs if unsure of exact links.
-5. Stage titles should be motivating and clear (not just "Stage 1").
-6. Descriptions should explain WHY this stage matters for the role.
-7. Tasks for skills the user already has should NOT appear — the roadmap \
+4. Stage titles should be motivating and clear (not just "Stage 1").
+5. Descriptions should explain WHY this stage matters for the role.
+6. Tasks for skills the user already has should NOT appear — the roadmap \
    is personalized to their gap.
-8. If a "PREVIOUSLY COVERED IN PAST ROADMAPS" section is provided, treat \
-   those skills as lower-priority — only revisit if necessary to fill a \
-   newly identified gap. Do NOT duplicate the same task structure from \
-   prior roadmaps; vary the angle (different project, different resource).
-9. If a "SPECIFIC FOCUS" is provided, AT LEAST ONE stage must be \
+7. DEDUPLICATION (when "PREVIOUSLY COVERED" section is provided):
+   - If a skill was already covered AND appears mastered, OMIT it entirely.
+   - If a skill must be revisited, you MUST change the angle — different \
+     project type, different framework, harder application, different \
+     resource creator. Never repeat the same task structure verbatim.
+   - Never re-suggest a specific task title that already appeared in \
+     a previous roadmap (e.g. "Build a To-Do app in React"). Pick a \
+     different project (e.g. "Build a Markdown editor in React").
+8. If a "SPECIFIC FOCUS" is provided, AT LEAST ONE stage must be \
    dedicated to it. Tasks within that stage should produce concrete \
    deliverables for that focus area.
-10. If "TANGIBLE OUTCOME REQUIRED" is set, the FINAL stage must be a \
-    capstone — either a small but complete project the user builds end-\
-    to-end, or a recognized certification they can sit for. Name the \
-    stage clearly (e.g., "Capstone Project" or "Certification Prep").
-11. If the user speaks Arabic (language=ar), write titles and descriptions \
-    in Arabic. Keep resource titles in their original language.
-12. Total roadmap should feel achievable in 3-6 months of part-time study.
-13. First stage should always be unlocked. Others unlock sequentially.
+9. If "TANGIBLE OUTCOME REQUIRED" is set, the FINAL stage must be a \
+   capstone — either a small but complete project the user builds end-\
+   to-end, or a recognized certification they can sit for. Name the \
+   stage clearly (e.g., "Capstone Project" or "Certification Prep").
+10. If the user speaks Arabic (language=ar), write titles and descriptions \
+    in Arabic. Keep resource titles and search queries in the original \
+    creator/platform language.
+11. Total roadmap should feel achievable in 3-6 months of part-time study.
+12. First stage should always be unlocked. Others unlock sequentially.
+
+RESOURCES — IMPORTANT:
+Links rot. A Coursera path that worked yesterday breaks tomorrow; a \
+Udemy slug changes quarterly; YouTube videos get unlisted. So for \
+EVERY resource you must produce TWO fields:
+
+  a) "url" — only fill this in for STABLE locations you are confident \
+     remain valid for years:
+       - Official docs (developer.mozilla.org, docs.python.org, \
+         react.dev, kubernetes.io/docs, etc.)
+       - Curriculum index pages (freecodecamp.org/learn, \
+         khanacademy.org/computing, w3schools.com/topic)
+       - Platform homepages (coursera.org, udemy.com — homepage only, \
+         NOT specific course slugs)
+       - Open-source/free books with stable URLs (eloquentjavascript.net)
+     For everything else — specific courses, YouTube videos, named \
+     instructor content — leave "url" as an empty string "".
+
+  b) "search_query" — REQUIRED for every resource. A short, opinionated \
+     Google/YouTube search string that will reliably find the current \
+     version of the resource, even after URL changes. Format guidance:
+       - Specific course → "Instructor full name + course topic + platform"
+         e.g. "Andrew Ramdayal CAPM Udemy"
+         e.g. "Maximilian Schwarzmüller React complete guide Udemy"
+       - YouTube content → "Channel name + topic + YouTube"
+         e.g. "Bro Code Python full course YouTube"
+         e.g. "Fireship Next.js 14 YouTube"
+       - Topic-level (no specific creator) → "Topic + platform + level"
+         e.g. "Linear algebra Khan Academy"
+         e.g. "AWS Cloud Practitioner Coursera"
+       - Certification prep → "Cert name + year/version + study guide"
+         e.g. "AWS Solutions Architect Associate SAA-C03 study guide"
+     Keep it under 80 characters. Use real instructor/creator names \
+     when you know them. The user will paste this into Google/YouTube.
 
 OUTPUT — valid JSON only, no markdown fences:
 {
@@ -64,8 +100,18 @@ OUTPUT — valid JSON only, no markdown fences:
           "description": "What to do and learn",
           "skill_name": "Python",
           "resources": [
-            {"type": "course", "title": "Resource name", "url": "https://..."},
-            {"type": "video", "title": "Resource name", "url": "https://..."}
+            {
+              "type": "course",
+              "title": "Complete Python Bootcamp",
+              "url": "",
+              "search_query": "Jose Portilla Python Bootcamp Udemy"
+            },
+            {
+              "type": "documentation",
+              "title": "Python Official Tutorial",
+              "url": "https://docs.python.org/3/tutorial/",
+              "search_query": "Python official tutorial docs.python.org"
+            }
           ]
         }
       ]
@@ -84,6 +130,7 @@ def build_roadmap_prompt(
     skill_focus: str | None = None,
     include_tangible_outcome: bool = False,
     previously_covered_skills: list[str] | None = None,
+    previously_covered_task_titles: list[str] | None = None,
 ) -> str:
     """
     Build the user prompt for roadmap generation.
@@ -99,6 +146,12 @@ def build_roadmap_prompt(
     previously_covered_skills
       Task 4 — list of skill names extracted from the user's previous
       roadmaps. Empty list / None means "first roadmap, no history".
+
+    previously_covered_task_titles
+      NEW — list of specific task titles from prior roadmaps. Much
+      stronger dedup signal than skill names alone: knowing the user
+      already did "Build a Pomodoro timer in React" prevents the
+      model from suggesting the same project a second time.
     """
 
     parts = [f"TARGET ROLE: {role_name}"]
@@ -123,11 +176,20 @@ def build_roadmap_prompt(
         )
 
     # ── Task 4: Skill Gap Analysis context ──────────────────────────────
+    # We supply BOTH skills covered AND specific task titles so the model
+    # can dedupe at both granularities.
     if previously_covered_skills:
         parts.append(
-            "PREVIOUSLY COVERED IN PAST ROADMAPS (lower priority — vary "
-            "the approach if revisiting):\n"
+            "PREVIOUSLY COVERED SKILLS — apply Rule 7 (deduplicate):\n"
             f"{', '.join(previously_covered_skills)}"
+        )
+    if previously_covered_task_titles:
+        # Cap to keep prompt size sane.
+        titles = previously_covered_task_titles[:25]
+        bullet_list = "\n".join(f"  - {t}" for t in titles)
+        parts.append(
+            "PREVIOUSLY COVERED TASK TITLES — do NOT repeat these verbatim:\n"
+            f"{bullet_list}"
         )
 
     # ── Task 1: Custom Skill Input ──────────────────────────────────────

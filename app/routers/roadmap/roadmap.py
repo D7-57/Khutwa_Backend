@@ -28,6 +28,8 @@ from app.services.roadmap.generator import (
     delete_roadmap_by_id,
     complete_task,
     uncomplete_task,
+    save_task_to_profile,
+    classify_task_for_profile,
 )
 
 router = APIRouter(prefix="/roadmap", tags=["roadmap"])
@@ -247,6 +249,86 @@ def uncomplete_roadmap_task(
 
     try:
         result = uncomplete_task(uid, tid, db)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return result
+
+
+# ── GET /roadmap/me/tasks/{task_id}/save-to-profile/suggestion ──
+#
+# Returns the classification result WITHOUT mutating anything. The UI
+# uses this to decide which "Save to profile" button to surface
+# (skill vs project vs certification), and to pre-fill the dialog.
+
+
+@router.get("/me/tasks/{task_id}/save-to-profile/suggestion")
+def get_save_to_profile_suggestion(
+    task_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    uid = UUID(user_id)
+    try:
+        tid = UUID(task_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid task_id")
+
+    task = db.get(RoadmapTask, tid)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    # Verify the task belongs to this user (don't leak others' task data).
+    stage = db.get(RoadmapStage, task.stage_id)
+    if stage:
+        roadmap = db.get(UserRoadmap, stage.roadmap_id)
+        if not roadmap or roadmap.user_id != uid:
+            raise HTTPException(status_code=404, detail="Task not found")
+    else:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    suggested = classify_task_for_profile(task)
+    return {
+        "suggested_kind": suggested,
+        "skill_name": task.skill_name,
+        "task_title": task.title,
+        "task_description": task.description,
+    }
+
+
+# ── POST /roadmap/me/tasks/{task_id}/save-to-profile ──
+#
+# Save a completed task to the user's profile. Body specifies which
+# kind to save as (skill | project | certification). The frontend
+# calls /suggestion first, but the user can override.
+#
+# We DO NOT require the task to be is_completed=True — saving an
+# in-progress task is fine, the user might want it on their profile
+# while they're still working on it.
+
+
+@router.post("/me/tasks/{task_id}/save-to-profile")
+def save_my_task_to_profile(
+    task_id: str,
+    body: dict,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    uid = UUID(user_id)
+    try:
+        tid = UUID(task_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid task_id")
+
+    kind = body.get("kind")
+    if kind not in {"skill", "project", "certification"}:
+        raise HTTPException(
+            status_code=400,
+            detail="kind must be one of: skill, project, certification",
+        )
+
+    try:
+        result = save_task_to_profile(uid, tid, kind, db)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

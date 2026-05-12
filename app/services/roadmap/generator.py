@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from openai import OpenAI
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -193,9 +194,11 @@ def generate_roadmap(
         existing_skills, gap_skills, existing_names, gap_names = (
             _compute_skill_gap(user_id, role.id, db)
         )
-        # Task 4: also gather what previous roadmaps covered, so the
-        # prompt can avoid repeating tasks that were already taught.
-        previously_covered = _summarize_previous_roadmaps(user_id, role.id, db)
+        # Task 4: also gather what previous roadmaps covered (skills
+        # AND specific task titles, for sharper dedup).
+        previously_covered, previously_covered_titles = (
+            _summarize_previous_roadmaps(user_id, role.id, db)
+        )
     else:
         # No personalization — pretend the user has no recorded skills
         # and no roadmap history. Generation falls back to "everything
@@ -203,6 +206,7 @@ def generate_roadmap(
         # into skill_focus.
         existing_skills, gap_skills, existing_names, gap_names = [], [], [], []
         previously_covered = []
+        previously_covered_titles = []
 
     template = (
         db.query(RoadmapTemplate)
@@ -226,6 +230,7 @@ def generate_roadmap(
             skill_focus=skill_focus,
             include_tangible_outcome=include_tangible_outcome,
             previously_covered_skills=previously_covered,
+            previously_covered_task_titles=previously_covered_titles,
         )
         source = "ai"
         is_ai = True
@@ -247,6 +252,7 @@ def generate_roadmap(
             skill_focus=skill_focus,
             include_tangible_outcome=include_tangible_outcome,
             previously_covered_skills=previously_covered,
+            previously_covered_task_titles=previously_covered_titles,
         )
         source = "ai"
         is_ai = True
@@ -437,14 +443,29 @@ def _resolve_role(
 def _compute_skill_gap(
     user_id: UUID, role_id: UUID, db: Session,
 ) -> tuple[list, list, list[str], list[str]]:
+    """
+    Compute role-skill gap based on the user's CATALOG skills.
+
+    Note on free-text (custom_name) UserSkill entries: those have
+    skill_id == NULL and can't match RoleSkill.skill_id, so they're
+    not factored into this gap calculation. Periodic dedup jobs that
+    merge custom names into catalog rows are the path to fixing that.
+    For now: if the user has "React Hooks" as a free-text skill but
+    not a catalog "React" entry, the gap will still include React.
+    Acceptable trade-off — users can always add catalog skills manually.
+    """
     required = (
         db.query(RoleSkill)
         .filter(RoleSkill.role_id == role_id)
         .all()
     )
+    # Only consider user-skills that link to the catalog.
     user_skills = (
         db.query(UserSkill)
-        .filter(UserSkill.user_id == user_id)
+        .filter(
+            UserSkill.user_id == user_id,
+            UserSkill.skill_id.isnot(None),
+        )
         .all()
     )
     user_skill_ids = {us.skill_id for us in user_skills}
@@ -469,30 +490,28 @@ def _compute_skill_gap(
 
 def _summarize_previous_roadmaps(
     user_id: UUID, role_id: UUID, db: Session,
-) -> list[str]:
+) -> tuple[list[str], list[str]]:
     """
     Task 4 — Skill Gap Analysis.
 
-    Returns a deduplicated list of skill names that appeared in the
-    user's previous roadmaps. The prompt uses this to avoid
-    re-teaching the same skills the same way.
+    Returns (previously_covered_skills, previously_covered_task_titles):
+      - skills: deduped skill names from prior roadmaps
+      - task titles: specific task titles, so the prompt can avoid
+        repeating "Build a To-Do app in React" type duplicates that
+        the skill-name signal alone would miss.
 
     We look at ALL of the user's roadmaps (not just the current role's)
     because skills overlap between roles. e.g. "Python" learned for
     Data Analyst is still Python when they switch to ML Engineer.
 
-    Returned skill names come from completed_at-ranked tasks first:
-    a skill the user has MARKED COMPLETE in a past roadmap is much
-    stronger evidence of mastery than one they enrolled in but
-    didn't finish. We pass completed-skill names ahead of
-    enrolled-but-incomplete ones, and cap the total at 30 to keep the
-    prompt size sane.
+    Completed-task skill names rank ahead of enrolled-but-incomplete
+    ones (stronger evidence of mastery). Both lists capped (30 skills,
+    40 titles) to keep prompt size sane.
 
     Caveat (spec note): we rely on the user's self-reported task
     completion. If the user marked things complete without actually
     learning them, this signal is noisy. The prompt instructs the
-    model to treat these as "lower priority" rather than "skip
-    entirely" for exactly this reason.
+    model to revisit at a different angle for these.
     """
     user_roadmaps = (
         db.query(UserRoadmap)
@@ -500,7 +519,7 @@ def _summarize_previous_roadmaps(
         .all()
     )
     if not user_roadmaps:
-        return []
+        return [], []
 
     roadmap_ids = [rm.id for rm in user_roadmaps]
     stage_rows = (
@@ -509,7 +528,7 @@ def _summarize_previous_roadmaps(
         .all()
     )
     if not stage_rows:
-        return []
+        return [], []
 
     stage_ids = [s.id for s in stage_rows]
     tasks = (
@@ -520,26 +539,41 @@ def _summarize_previous_roadmaps(
 
     completed_skills: list[str] = []
     other_skills: list[str] = []
+    completed_titles: list[str] = []
+    other_titles: list[str] = []
     for t in tasks:
-        if not t.skill_name:
-            continue
-        if t.is_completed:
-            completed_skills.append(t.skill_name)
-        else:
-            other_skills.append(t.skill_name)
+        if t.skill_name:
+            (completed_skills if t.is_completed else other_skills).append(
+                t.skill_name
+            )
+        if t.title:
+            (completed_titles if t.is_completed else other_titles).append(
+                t.title
+            )
 
-    # Dedup preserving order: completed first (stronger signal), then others.
-    seen: set[str] = set()
-    ordered: list[str] = []
+    # Dedup skills, case-insensitive, preserving order.
+    seen_s: set[str] = set()
+    ordered_skills: list[str] = []
     for name in completed_skills + other_skills:
         key = name.strip().lower()
-        if key and key not in seen:
-            seen.add(key)
-            ordered.append(name.strip())
-        if len(ordered) >= 30:  # prompt-size guard
+        if key and key not in seen_s:
+            seen_s.add(key)
+            ordered_skills.append(name.strip())
+        if len(ordered_skills) >= 30:
             break
 
-    return ordered
+    # Dedup titles, case-insensitive, preserving order.
+    seen_t: set[str] = set()
+    ordered_titles: list[str] = []
+    for title in completed_titles + other_titles:
+        key = title.strip().lower()
+        if key and key not in seen_t:
+            seen_t.add(key)
+            ordered_titles.append(title.strip())
+        if len(ordered_titles) >= 40:
+            break
+
+    return ordered_skills, ordered_titles
 
 
 def _delete_single_roadmap(rm: UserRoadmap, db: Session):
@@ -577,6 +611,7 @@ def _generate_with_ai(
     skill_focus: str | None = None,
     include_tangible_outcome: bool = False,
     previously_covered_skills: list[str] | None = None,
+    previously_covered_task_titles: list[str] | None = None,
 ) -> dict:
     profile_context = {}
     if profile.major:
@@ -597,6 +632,7 @@ def _generate_with_ai(
         skill_focus=skill_focus,
         include_tangible_outcome=include_tangible_outcome,
         previously_covered_skills=previously_covered_skills or [],
+        previously_covered_task_titles=previously_covered_task_titles or [],
     )
 
     try:
@@ -716,3 +752,248 @@ def _persist_roadmap(
 
     db.flush()
     return roadmap
+
+
+# ════════════════════════════════════════════════════════════════════
+#  SAVE TASK TO PROFILE
+# ════════════════════════════════════════════════════════════════════
+
+
+# Heuristics used by classify_task_for_profile() — kept as module-level
+# constants so tests can import & tweak them.
+_PROJECT_KEYWORDS = (
+    "build", "create", "develop", "design", "make", "ship",
+    "deploy", "implement", "project", "portfolio", "capstone",
+    "clone", "prototype", "app", "tool", "site", "website",
+)
+_CERT_KEYWORDS = (
+    "certif", "certified", "certification", "exam",
+    "saa-c03", "az-900", "aws certified", "google professional",
+    "comptia", "cissp", "pmp", "capm", "scrum master",
+)
+
+
+def classify_task_for_profile(task: "RoadmapTask") -> str:
+    """
+    Pick the most appropriate "save as" kind for a completed task.
+
+    Returns one of: "certification", "project", "skill".
+
+    Heuristic order matters — certifications are checked first because
+    "Build certification prep notes" should still be classified as
+    project unless the cert keyword is strong; conversely "Earn AWS
+    Certified Solutions Architect" should always be cert.
+    """
+    title_lower = (task.title or "").lower()
+    desc_lower = (task.description or "").lower()
+    combined = f"{title_lower} {desc_lower}"
+
+    if any(k in combined for k in _CERT_KEYWORDS):
+        return "certification"
+    if any(k in title_lower for k in _PROJECT_KEYWORDS):
+        return "project"
+    # Default: if the task has an explicit skill_name, save as skill.
+    if task.skill_name:
+        return "skill"
+    # Fallback for tasks with no skill_name and no project/cert signal —
+    # treat as a skill using the task title.
+    return "skill"
+
+
+def save_task_to_profile(
+    user_id: UUID, task_id: UUID, kind: str, db: Session,
+) -> dict:
+    """
+    Save a completed roadmap task to the user's profile, as either:
+      - a UserSkill (catalog match if possible, else free-text)
+      - a project entry (appended to profile.projects JSONB list)
+      - a certification entry (appended to profile.certifications)
+
+    Returns { kind, item } where item is the persisted shape.
+
+    NOTE: this is intentionally permissive — it will save the same
+    task multiple times if the user does so. The dedup safety net
+    sits in the UserSkill table (unique constraints), and on the
+    JSONB lists we check by name and skip duplicates.
+    """
+    if kind not in {"skill", "project", "certification"}:
+        raise ValueError(
+            f"Invalid kind: {kind}. Must be skill | project | certification."
+        )
+
+    task = db.get(RoadmapTask, task_id)
+    if not task:
+        raise ValueError("Task not found")
+
+    # Ensure the task belongs to a roadmap owned by this user.
+    stage = db.get(RoadmapStage, task.stage_id)
+    if not stage:
+        raise ValueError("Task's stage not found")
+    roadmap = db.get(UserRoadmap, stage.roadmap_id)
+    if not roadmap or roadmap.user_id != user_id:
+        raise ValueError("Task does not belong to this user")
+
+    profile = db.get(Profile, user_id)
+    if not profile:
+        raise ValueError("Profile not found")
+
+    # ── Save as skill ────────────────────────────────────────────────
+    if kind == "skill":
+        skill_name = (task.skill_name or task.title).strip()
+        if not skill_name:
+            raise ValueError("Task has no skill_name or title to save")
+
+        # Look for a catalog match first (case-insensitive).
+        catalog = (
+            db.query(Skill)
+            .filter(func.lower(Skill.name) == skill_name.lower())
+            .first()
+        )
+
+        if catalog:
+            # Dedup against existing catalog-linked entry for this user.
+            existing = (
+                db.query(UserSkill)
+                .filter(
+                    UserSkill.user_id == user_id,
+                    UserSkill.skill_id == catalog.id,
+                )
+                .first()
+            )
+            if existing:
+                # Already saved — don't overwrite level/years they may
+                # have set manually. Just bump the source if it makes
+                # sense (manual > roadmap).
+                return {
+                    "kind": "skill",
+                    "created": False,
+                    "item": {
+                        "id": str(existing.id),
+                        "skill_name": catalog.name,
+                        "is_custom": False,
+                    },
+                }
+            us = UserSkill(
+                user_id=user_id,
+                skill_id=catalog.id,
+                custom_name=None,
+                source="roadmap",
+            )
+            db.add(us)
+            db.commit()
+            db.refresh(us)
+            return {
+                "kind": "skill",
+                "created": True,
+                "item": {
+                    "id": str(us.id),
+                    "skill_name": catalog.name,
+                    "is_custom": False,
+                },
+            }
+
+        # No catalog match — create a free-text entry. Dedup
+        # case-insensitive against the user's existing custom names.
+        existing_custom = (
+            db.query(UserSkill)
+            .filter(
+                UserSkill.user_id == user_id,
+                UserSkill.skill_id.is_(None),
+                func.lower(UserSkill.custom_name) == skill_name.lower(),
+            )
+            .first()
+        )
+        if existing_custom:
+            return {
+                "kind": "skill",
+                "created": False,
+                "item": {
+                    "id": str(existing_custom.id),
+                    "skill_name": existing_custom.custom_name,
+                    "is_custom": True,
+                },
+            }
+
+        us = UserSkill(
+            user_id=user_id,
+            skill_id=None,
+            custom_name=skill_name,
+            source="roadmap",
+        )
+        db.add(us)
+        db.commit()
+        db.refresh(us)
+        return {
+            "kind": "skill",
+            "created": True,
+            "item": {
+                "id": str(us.id),
+                "skill_name": skill_name,
+                "is_custom": True,
+            },
+        }
+
+    # ── Save as project ──────────────────────────────────────────────
+    if kind == "project":
+        # profile.projects is a JSONB list of dicts. We append, dedup
+        # by lower(name).
+        project_name = task.title.strip()
+        if not project_name:
+            raise ValueError("Task has no title to save as a project")
+
+        # Reassign with a NEW list to ensure SQLAlchemy detects the change.
+        # In-place .append on a JSONB column doesn't always flag the
+        # attribute as dirty.
+        current = list(profile.projects or [])
+        already = any(
+            (p.get("name") or "").lower() == project_name.lower()
+            for p in current
+        )
+        if already:
+            return {"kind": "project", "created": False, "item": {"name": project_name}}
+
+        new_entry = {
+            "name": project_name,
+            "description": task.description or "",
+            "tech": [task.skill_name] if task.skill_name else [],
+            "url": "",
+            "source": "roadmap",
+        }
+        current.append(new_entry)
+        profile.projects = current
+        # Belt+suspenders on JSONB mutation detection.
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(profile, "projects")
+        db.commit()
+        return {"kind": "project", "created": True, "item": new_entry}
+
+    # ── Save as certification ────────────────────────────────────────
+    cert_name = task.title.strip()
+    if not cert_name:
+        raise ValueError("Task has no title to save as a certification")
+
+    current = list(profile.certifications or [])
+    already = any(
+        (c.get("name") or "").lower() == cert_name.lower()
+        for c in current
+    )
+    if already:
+        return {
+            "kind": "certification",
+            "created": False,
+            "item": {"name": cert_name},
+        }
+
+    new_entry = {
+        "name": cert_name,
+        "issuer": "",
+        "date": "",
+        "url": "",
+        "source": "roadmap",
+    }
+    current.append(new_entry)
+    profile.certifications = current
+    from sqlalchemy.orm.attributes import flag_modified
+    flag_modified(profile, "certifications")
+    db.commit()
+    return {"kind": "certification", "created": True, "item": new_entry}
