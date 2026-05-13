@@ -1,14 +1,6 @@
-<<<<<<< HEAD
 from fastapi import Depends, FastAPI
-from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
-import os
-=======
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
->>>>>>> 57b718ccfcf7fac10f07b8862a1fa48f1d90b4b8
 
 from app.db.session import get_db
 from app.models.career.role import Role
