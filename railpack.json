@@ -11,9 +11,9 @@
     "pkg-config"
   ],
   "steps": {
-    "install": {
+    "build": {
+      "inputs": [{ "step": "install" }],
       "commands": [
-        "...",
         "python download_models.py"
       ]
     }
