@@ -1,0 +1,16 @@
+# Railway service settings.
+# These can also be set via the Railway dashboard, but keeping them in
+# the repo means they survive if the service is recreated.
+
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+# Path Railway hits to confirm the container is alive.
+# Your app already exposes /health (see app/routers/health.py).
+healthcheckPath = "/health"
+healthcheckTimeout = 100
+
+# If the container crashes, restart it (up to 10 times) before giving up.
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

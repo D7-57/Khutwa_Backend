@@ -1,2 +1,20 @@
+# Railway / Nixpacks build configuration
+
 [phases.setup]
+# System libraries needed by OpenCV + MediaPipe shared objects.
+# (libGL = OpenGL stub, glib + xcb = X11 plumbing pulled in by cv2,
+#  zlib = compression used by mediapipe model loading)
 nixPkgs = ["xorg.libxcb", "libGL", "glib", "zlib"]
+
+[phases.install]
+# Standard pip install — Railway runs this automatically, but pinning it
+# here lets us add the model download right after.
+cmds = [
+  "pip install --no-cache-dir -r requirements.txt",
+  "python download_models.py",
+]
+
+[start]
+# Railway injects $PORT; Procfile would also work, but having it here
+# makes the command explicit in the build logs.
+cmd = "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT"
