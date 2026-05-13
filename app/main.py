@@ -1,8 +1,5 @@
 from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-import os
 
 # ── existing routers ──
 from app.routers.health import router as health_router
