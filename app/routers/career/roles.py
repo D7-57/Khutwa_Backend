@@ -1,5 +1,5 @@
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.security import get_current_user_id
@@ -22,6 +22,30 @@ from app.services.career.role_detection import detect_roles
 from app.services.career.prompts import QUESTION_LABELS
 
 router = APIRouter(prefix="/career/roles", tags=["career-roles"])
+
+
+def register_role_compat_aliases(app: FastAPI) -> None:
+    """
+    Register legacy role endpoints directly on the app.
+
+    Why this helper exists:
+    - We keep the canonical role routes on `router` (prefix `/career/roles`).
+    - Legacy clients still call `/api/roles/tree` and `/api/v1/roles`.
+    - We avoid introducing a second APIRouter just for compatibility paths.
+    """
+
+    @app.get("/api/roles/tree", include_in_schema=False)
+    def compat_api_roles_tree(db: Session = Depends(get_db)):
+        return get_role_tree(db)
+
+    @app.get("/api/v1/roles", response_model=list[RoleOut], include_in_schema=False)
+    def compat_api_v1_roles(db: Session = Depends(get_db)):
+        return (
+            db.query(Role)
+            .filter(Role.role_type == "role")
+            .order_by(Role.name)
+            .all()
+        )
 
 
 # ── Domain names allowed in the AI detect flow ────────────────────────────────
