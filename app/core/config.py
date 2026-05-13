@@ -13,7 +13,5 @@ class Settings(BaseSettings):
 
     OPENAI_API_KEY: str
 
-    AZURE_SPEECH_KEY: str
-    AZURE_SPEECH_REGION: str
 
 settings = Settings()

@@ -62,10 +62,8 @@ app.include_router(cv_quiz_router)
 app.include_router(cv_builder_router)
 
 
-# static UI
-app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 @app.get("/")
-def serve_ui():
-    return FileResponse(os.path.join("static", "index.html"))
+def root():
+    return {"status": "ok"}
