@@ -76,6 +76,12 @@ ROLE_TREE: list[dict] = [
                     {"name_en": "Penetration Tester",  "name_ar": "مختبر اختراق",                   "description": "Simulate attacks to identify security weaknesses."},
                     {"name_en": "Security Engineer",   "name_ar": "مهندس أمن",                      "description": "Design and implement security controls and architectures."},
                     {"name_en": "GRC Specialist",      "name_ar": "متخصص حوكمة ومخاطر وامتثال",     "description": "Manage governance, risk, and compliance frameworks."},
+                    {"name_en": "VAPT Specialist",     "name_ar": "متخصص اختبار ثغرات واختراق",    "description": "Run vulnerability assessments and penetration tests across systems and applications."},
+                    {"name_en": "SOC Analyst L1",      "name_ar": "محلل SOC المستوى 1",             "description": "Tier-1 SOC monitoring, triage, and initial incident classification."},
+                    {"name_en": "SOC Analyst L2",      "name_ar": "محلل SOC المستوى 2",             "description": "Tier-2 SOC investigation, deeper analysis, and escalation handling."},
+                    {"name_en": "SOC Analyst L3",      "name_ar": "محلل SOC المستوى 3",             "description": "Tier-3 SOC advanced threat hunting and complex incident response."},
+                    {"name_en": "SOC Manager",         "name_ar": "مدير مركز العمليات الأمنية",     "description": "Lead SOC operations, processes, staffing, and stakeholder reporting."},
+                    {"name_en": "Incident Responder",  "name_ar": "مستجيب حوادث أمنية",             "description": "Contain, eradicate, and recover from security incidents and breaches."},
                 ],
             },
             {
@@ -402,6 +408,30 @@ ROLE_SKILLS_MAP: dict[str, list[tuple[str, float]]] = {
     "GRC Specialist": [
         ("ISO 27001", 0.9), ("NIST Framework", 0.9), ("Risk Assessment", 0.8),
         ("Stakeholder Management", 0.7), ("Communication", 0.7),
+    ],
+    "VAPT Specialist": [
+        ("Penetration Testing", 0.9), ("Vulnerability Assessment", 0.9),
+        ("Network Security", 0.7), ("Linux Administration", 0.6),
+    ],
+    "SOC Analyst L1": [
+        ("SIEM", 0.9), ("Incident Response", 0.7), ("Network Security", 0.7),
+        ("Linux Administration", 0.6),
+    ],
+    "SOC Analyst L2": [
+        ("SIEM", 0.9), ("Incident Response", 0.9), ("Network Security", 0.8),
+        ("Penetration Testing", 0.5),
+    ],
+    "SOC Analyst L3": [
+        ("SIEM", 0.9), ("Incident Response", 0.9), ("Penetration Testing", 0.7),
+        ("Vulnerability Assessment", 0.8),
+    ],
+    "SOC Manager": [
+        ("Incident Response", 0.8), ("SIEM", 0.7), ("Agile / Scrum", 0.6),
+        ("Leadership", 0.9), ("Communication", 0.9),
+    ],
+    "Incident Responder": [
+        ("Incident Response", 0.9), ("SIEM", 0.8), ("Network Security", 0.8),
+        ("Linux Administration", 0.7),
     ],
 
     # ── Networking & Cloud ────────────────────────────────────────────────────

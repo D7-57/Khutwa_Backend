@@ -1,8 +1,13 @@
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from sqlalchemy.orm import Session
 import os
+
+from app.db.session import get_db
+from app.models.career.role import Role
+from app.schemas.career.roles import RoleOut
 
 # ── existing routers ──
 from app.routers.health import router as health_router
@@ -20,7 +25,7 @@ from app.routers.auth.skills import router as auth_skills_router
 from app.routers.auth.onboarding_cv import router as onboarding_cv_router
 from app.routers.auth.privacy import router as auth_privacy_router
 from app.routers.auth.account import router as auth_account_router  # NEW
-from app.routers.career.roles import router as career_roles_router
+from app.routers.career.roles import get_role_tree, router as career_roles_router
 from app.routers.career.skills import router as career_skills_router
 from app.routers.roadmap.roadmap import router as roadmap_router
 
@@ -67,3 +72,20 @@ app.include_router(cv_builder_router)
 @app.get("/")
 def root():
     return {"status": "ok"}
+
+
+@app.get("/api/roles/tree", include_in_schema=False)
+def compat_api_roles_tree(db: Session = Depends(get_db)):
+    """Alias for older/web clients that call `/api/roles/tree`. Canonical route: `GET /career/roles/tree`."""
+    return get_role_tree(db)
+
+
+@app.get("/api/v1/roles", response_model=list[RoleOut], include_in_schema=False)
+def compat_api_v1_roles(db: Session = Depends(get_db)):
+    """Alias for clients that call `/api/v1/roles` (REST-style). Returns leaf job roles."""
+    return (
+        db.query(Role)
+        .filter(Role.role_type == "role")
+        .order_by(Role.name)
+        .all()
+    )

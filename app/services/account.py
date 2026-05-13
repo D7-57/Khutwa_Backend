@@ -30,6 +30,9 @@ from app.models.cv_quiz import CVQuiz, CVQuizAttempt
 from app.models.roadmap.models import UserRoadmap, RoadmapStage, RoadmapTask
 from app.models.career.skill import UserSkill
 from app.models.career.role import UserRole
+from app.models.interview import InterviewSession
+from app.models.question import Question
+from app.models.question_vote import QuestionVote, QuestionRelevanceFeedback
 from app.services.supabase_admin import delete_auth_user, delete_storage_objects
 
 
@@ -106,9 +109,31 @@ def _wipe_user_content(db: Session, uid: UUID) -> dict:
         .delete(synchronize_session="fetch")
     )
 
-    # TODO(interviews): when the interview tables exist, wipe them here:
-    #   counts["interview_sessions"] = db.query(InterviewSession)...
-    #   counts["interview_answers"]  = db.query(InterviewAnswer)...
+    # Interview history (session_questions cascade from interview_sessions).
+    counts["interview_sessions"] = (
+        db.query(InterviewSession)
+        .filter(InterviewSession.user_id == uid)
+        .delete(synchronize_session="fetch")
+    )
+
+    # User-originated moderation signals should be erased.
+    counts["question_votes"] = (
+        db.query(QuestionVote)
+        .filter(QuestionVote.user_id == uid)
+        .delete(synchronize_session="fetch")
+    )
+    counts["question_relevance_feedback"] = (
+        db.query(QuestionRelevanceFeedback)
+        .filter(QuestionRelevanceFeedback.user_id == uid)
+        .delete(synchronize_session="fetch")
+    )
+
+    # Keep contributed question-bank entries, but remove the personal link.
+    counts["questions_anonymized"] = (
+        db.query(Question)
+        .filter(Question.submitted_by == uid)
+        .update({"submitted_by": None}, synchronize_session="fetch")
+    )
 
     # ── 3) Wipe Storage objects ──
     # Done AFTER DB commit on the caller side — see the service functions
