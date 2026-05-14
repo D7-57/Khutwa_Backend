@@ -22,6 +22,7 @@ from app.routers.career.roles import (
     router as career_roles_router,
 )
 from app.routers.career.skills import router as career_skills_router
+from app.routers.career.role_survey import router as role_survey_router  # NEW
 from app.routers.roadmap.roadmap import router as roadmap_router
 
 
@@ -30,7 +31,7 @@ app = FastAPI(title="Khutwa API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -49,6 +50,7 @@ app.include_router(auth_account_router)  # NEW — delete data / delete account 
 # career catalog
 app.include_router(career_roles_router)
 app.include_router(career_skills_router)
+app.include_router(role_survey_router)   # NEW — deterministic role-discovery survey
 
 # roadmap
 app.include_router(roadmap_router)

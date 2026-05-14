@@ -50,6 +50,38 @@ RULES:
     creator/platform language.
 11. Total roadmap should feel achievable in 3-6 months of part-time study.
 12. First stage should always be unlocked. Others unlock sequentially.
+13. PERSONALIZATION IS MANDATORY:
+    - Infer level from years_of_experience, current_status, prior
+      certifications, and prior experience.
+    - Beginners: include foundations. Advanced users: skip basics and move
+      to intermediate/advanced implementation and threat-driven practice.
+14. CERTIFICATION QUALITY:
+    - If suggesting certifications, prioritize globally recognized,
+      role-standard certifications (vendor-neutral or vendor-official).
+    - Do NOT suggest generic marketplace course certificates as the primary
+      outcome (e.g., random Coursera/Udemy completion certificates).
+    - Do NOT re-suggest certifications the user already has.
+15. CERT-FIRST LOGIC:
+    - For ANY role, prioritize professional certification progression first,
+      then projects/labs that prove applied skill for each cert milestone.
+    - If no certifications exist for the user, start with foundational certs
+      for that role family, then progress to intermediate/advanced certs.
+    - If the user already has some certs, skip those and continue from the
+      next suitable certification level.
+    - Prefer role-specific certification ladders over generic course-first
+      plans.
+16. COURSERA/GENERIC COURSES FALLBACK:
+    - Use Coursera/Udemy-style resources only for behavioral/soft-skills or
+      when there is no strong professional certification option for that
+      specific competency.
+    - For core technical track milestones, prefer cert prep + official docs +
+      realistic labs over generic course-first plans.
+17. CERT MILESTONE COVERAGE:
+    - Include at least one explicit professional certification milestone when
+      recognized certifications exist for the target role.
+    - If no recognized certification exists for a specific competency, use
+      role-relevant practical project milestones and only then add course
+      resources as support.
 
 RESOURCES — IMPORTANT:
 Links rot. A Coursera path that worked yesterday breaks tomorrow; a \
@@ -222,6 +254,28 @@ def build_roadmap_prompt(
             ctx_lines.append(
                 f"Graduation year: {profile_context['graduation_year']}"
             )
+        if profile_context.get("years_of_experience"):
+            ctx_lines.append(
+                f"Years of experience: {profile_context['years_of_experience']}"
+            )
+        if profile_context.get("experience_level"):
+            ctx_lines.append(
+                f"Inferred level: {profile_context['experience_level']}"
+            )
+        if profile_context.get("certifications"):
+            certs = profile_context["certifications"]
+            if isinstance(certs, list) and certs:
+                ctx_lines.append(
+                    "Existing certifications (already earned): "
+                    + ", ".join(certs[:12])
+                )
+        if profile_context.get("recommended_standard_certs"):
+            rec = profile_context["recommended_standard_certs"]
+            if isinstance(rec, list) and rec:
+                ctx_lines.append(
+                    "Recommended standard certifications for this role: "
+                    + ", ".join(rec[:10])
+                )
         if ctx_lines:
             parts.append("PROFILE CONTEXT:\n" + "\n".join(ctx_lines))
 
