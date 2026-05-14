@@ -1,4 +1,6 @@
-from pydantic import BaseModel, Field, field_validator
+import re
+
+from pydantic import BaseModel, Field, field_validator, model_validator
 from uuid import UUID
 from datetime import datetime
 
@@ -127,8 +129,8 @@ class ProfileUpdate(BaseModel):
 
 
 class OnboardingBasicInfo(BaseModel):
-    first_name: str = Field(..., min_length=1, max_length=80)
-    last_name: str = Field(..., min_length=1, max_length=80)
+    first_name: str = Field(..., min_length=2, max_length=30)
+    last_name: str = Field(..., min_length=2, max_length=30)
     phone: str | None = None
     major: str | None = None
     university: str | None = None
@@ -183,3 +185,45 @@ class OnboardingBasicInfo(BaseModel):
                 f"years_of_experience must be one of {sorted(ALLOWED_YEARS_OF_EXPERIENCE)}"
             )
         return v
+
+    @field_validator("first_name", "last_name")
+    @classmethod
+    def _validate_name_letters_and_single_script(cls, v: str) -> str:
+        value = v.strip()
+        if not value:
+            raise ValueError("Name is required.")
+
+        ar_only = bool(re.fullmatch(r"[\u0600-\u06FF ]+", value))
+        en_only = bool(re.fullmatch(r"[A-Za-z ]+", value))
+        if not (ar_only or en_only):
+            raise ValueError(
+                "Name must contain letters only in one language (Arabic OR English), without mixing."
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _validate_names_same_language(self):
+        ar_first = bool(re.fullmatch(r"[\u0600-\u06FF ]+", self.first_name))
+        ar_last = bool(re.fullmatch(r"[\u0600-\u06FF ]+", self.last_name))
+        en_first = bool(re.fullmatch(r"[A-Za-z ]+", self.first_name))
+        en_last = bool(re.fullmatch(r"[A-Za-z ]+", self.last_name))
+        same_language = (ar_first and ar_last) or (en_first and en_last)
+        if not same_language:
+            raise ValueError(
+                "First and last name must use the same language (both Arabic or both English)."
+            )
+        return self
+
+    @field_validator("phone")
+    @classmethod
+    def _validate_saudi_phone_format(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        value = v.strip()
+        if not value:
+            return None
+        if not re.fullmatch(r"(05\d{8})|(\+9665\d{8})", value):
+            raise ValueError(
+                "Phone must be a valid Saudi mobile number: 05XXXXXXXX or +9665XXXXXXXX."
+            )
+        return value

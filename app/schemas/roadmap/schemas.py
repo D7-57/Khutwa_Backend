@@ -79,6 +79,7 @@ class RoadmapOut(BaseModel):
     title_ar: str | None = None
     role_id: UUID | None = None
     role_name: str | None = None
+    role_name_ar: str | None = None
     source: str = "template"
     is_ai_generated: bool = False
     overall_progress: float = 0.0
@@ -102,6 +103,7 @@ class RoadmapSummary(BaseModel):
     title_ar: str | None = None
     role_id: UUID | None = None
     role_name: str | None = None
+    role_name_ar: str | None = None
     source: str = "template"
     is_ai_generated: bool = False
     overall_progress: float = 0.0

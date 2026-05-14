@@ -232,14 +232,50 @@ CERT_ALIAS_MAP: dict[str, set[str]] = {
 #  PUBLIC API
 # ────────────────────────────────────────────────────────────
 
+def _backfill_missing_roadmap_titles(roadmaps: list[UserRoadmap], db: Session) -> None:
+    """
+    Populate missing `title_ar` for existing roadmap rows (one-time backfill).
+    Keeps reads language-safe for old data created before bilingual title support.
+    """
+    changed = False
+    role_cache: dict[UUID, Role | None] = {}
+    for rm in roadmaps:
+        current_ar = (rm.title_ar or "").strip()
+        if current_ar:
+            continue
+
+        role: Role | None = None
+        if rm.role_id:
+            if rm.role_id not in role_cache:
+                role_cache[rm.role_id] = db.get(Role, rm.role_id)
+            role = role_cache[rm.role_id]
+
+        if _contains_arabic(rm.title):
+            rm.title_ar = rm.title
+            changed = True
+            continue
+
+        if role and role.name_ar:
+            rm.title_ar = f"طريقك إلى {role.name_ar}"
+            changed = True
+        else:
+            rm.title_ar = rm.title
+            changed = True
+
+    if changed:
+        db.commit()
+
+
 def get_user_roadmaps(user_id: UUID, db: Session) -> list[UserRoadmap]:
     """Fetch all of the user's roadmaps, newest first."""
-    return (
+    roadmaps = (
         db.query(UserRoadmap)
         .filter(UserRoadmap.user_id == user_id)
         .order_by(UserRoadmap.created_at.desc())
         .all()
     )
+    _backfill_missing_roadmap_titles(roadmaps, db)
+    return roadmaps
 
 
 def get_user_roadmap(user_id: UUID, db: Session, roadmap_id: UUID | None = None) -> UserRoadmap | None:
@@ -247,14 +283,18 @@ def get_user_roadmap(user_id: UUID, db: Session, roadmap_id: UUID | None = None)
     if roadmap_id:
         rm = db.get(UserRoadmap, roadmap_id)
         if rm and rm.user_id == user_id:
+            _backfill_missing_roadmap_titles([rm], db)
             return rm
         return None
-    return (
+    rm = (
         db.query(UserRoadmap)
         .filter(UserRoadmap.user_id == user_id)
         .order_by(UserRoadmap.created_at.desc())
         .first()
     )
+    if rm:
+        _backfill_missing_roadmap_titles([rm], db)
+    return rm
 
 
 def get_roadmap_full(roadmap: UserRoadmap, db: Session) -> dict:
@@ -279,10 +319,12 @@ def get_roadmap_full(roadmap: UserRoadmap, db: Session) -> dict:
         tasks_by_stage.setdefault(t.stage_id, []).append(t)
 
     role_name = None
+    role_name_ar = None
     if roadmap.role_id:
         role = db.get(Role, roadmap.role_id)
         if role:
-            role_name = role.name
+            role_name = role.name_en or role.name
+            role_name_ar = role.name_ar
 
     return {
         "id": roadmap.id,
@@ -290,6 +332,7 @@ def get_roadmap_full(roadmap: UserRoadmap, db: Session) -> dict:
         "title_ar": roadmap.title_ar,
         "role_id": roadmap.role_id,
         "role_name": role_name,
+        "role_name_ar": role_name_ar,
         "source": roadmap.source,
         "is_ai_generated": roadmap.is_ai_generated,
         "overall_progress": roadmap.overall_progress,
@@ -466,8 +509,13 @@ def generate_roadmap(
         is_ai = True
 
     # ── Persist to DB ───────────────────────────────────
-    title = roadmap_data.get("title", f"{role.name} Roadmap")
-    title_ar = roadmap_data.get("title_ar")
+    # Keep both title columns populated so the frontend can switch by language.
+    _ensure_bilingual_roadmap_fields(roadmap_data, language=language)
+    title, title_ar = _resolve_roadmap_titles(
+        role=role,
+        roadmap_data=roadmap_data,
+        language=language,
+    )
     roadmap = _persist_roadmap(
         user_id=user_id,
         role_id=role.id,
@@ -1161,6 +1209,86 @@ def _personalize_template(
 
     data["stages"] = filtered_stages
     return data
+
+
+def _contains_arabic(text: str | None) -> bool:
+    return bool(text and re.search(r"[\u0600-\u06FF]", text))
+
+
+def _resolve_roadmap_titles(
+    *,
+    role: Role,
+    roadmap_data: dict,
+    language: str,
+) -> tuple[str, str]:
+    """
+    Always return BOTH `title` and `title_ar` so DB rows are bilingual-ready.
+    """
+    raw_title = str(roadmap_data.get("title") or "").strip()
+    raw_title_ar = str(roadmap_data.get("title_ar") or "").strip()
+
+    role_en = (role.name_en or role.name or "").strip()
+    role_ar = (role.name_ar or role.name_en or role.name or "").strip()
+
+    default_en = f"Your Path to {role_en}" if role_en else "Your Career Roadmap"
+    default_ar = f"طريقك إلى {role_ar}" if role_ar else "خارطة مسارك المهني"
+
+    if language == "ar":
+        title_ar = raw_title_ar or raw_title or default_ar
+        title = raw_title if (raw_title and not _contains_arabic(raw_title)) else default_en
+    else:
+        title = raw_title or default_en
+        title_ar = raw_title_ar or (raw_title if _contains_arabic(raw_title) else default_ar)
+
+    return title.strip(), title_ar.strip()
+
+
+def _ensure_bilingual_roadmap_fields(roadmap_data: dict, *, language: str) -> None:
+    """
+    Fill missing *_ar fields in generated roadmap payload.
+    For Arabic generations, mirror Arabic text into *_ar when model only returned
+    `title`/`description` in Arabic.
+    """
+    if not isinstance(roadmap_data, dict):
+        return
+
+    if language == "ar":
+        title = str(roadmap_data.get("title") or "").strip()
+        if title and not str(roadmap_data.get("title_ar") or "").strip():
+            roadmap_data["title_ar"] = title
+
+    stages = roadmap_data.get("stages")
+    if not isinstance(stages, list):
+        return
+
+    for stage in stages:
+        if not isinstance(stage, dict):
+            continue
+        stage_title = str(stage.get("title") or "").strip()
+        if stage_title and not str(stage.get("title_ar") or "").strip():
+            if language == "ar" or _contains_arabic(stage_title):
+                stage["title_ar"] = stage_title
+
+        stage_desc = str(stage.get("description") or "").strip()
+        if stage_desc and not str(stage.get("description_ar") or "").strip():
+            if language == "ar" or _contains_arabic(stage_desc):
+                stage["description_ar"] = stage_desc
+
+        tasks = stage.get("tasks")
+        if not isinstance(tasks, list):
+            continue
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            task_title = str(task.get("title") or "").strip()
+            if task_title and not str(task.get("title_ar") or "").strip():
+                if language == "ar" or _contains_arabic(task_title):
+                    task["title_ar"] = task_title
+
+            task_desc = str(task.get("description") or "").strip()
+            if task_desc and not str(task.get("description_ar") or "").strip():
+                if language == "ar" or _contains_arabic(task_desc):
+                    task["description_ar"] = task_desc
 
 
 def _persist_roadmap(

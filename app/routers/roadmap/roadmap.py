@@ -65,10 +65,12 @@ def list_my_roadmaps(
     result = []
     for rm in roadmaps:
         role_name = None
+        role_name_ar = None
         if rm.role_id:
             role = db.get(Role, rm.role_id)
             if role:
-                role_name = role.name
+                role_name = role.name_en or role.name
+                role_name_ar = role.name_ar
 
         stage_count = (
             db.query(RoadmapStage)
@@ -91,6 +93,7 @@ def list_my_roadmaps(
                 title_ar=rm.title_ar,
                 role_id=rm.role_id,
                 role_name=role_name,
+                role_name_ar=role_name_ar,
                 source=rm.source,
                 is_ai_generated=rm.is_ai_generated,
                 overall_progress=rm.overall_progress,
