@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     SUPABASE_JWT_SECRET: str  # used to verify JWT
     # Optional for local dev: role tree / DB routes work without it. Required
     # for Supabase admin calls (see app.services.supabase_admin).
-    SUPABASE_SERVICE_ROLE_KEY: str = ""
+    SUPABASE_SERVICE_ROLE_KEY: str
 
     OPENAI_API_KEY: str
 
