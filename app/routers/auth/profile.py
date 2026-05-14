@@ -248,3 +248,4 @@ def _profile_to_out(profile: Profile) -> ProfileOut:
         privacy=settings_to_out(settings),
         created_at=profile.created_at,
     )
+

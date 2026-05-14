@@ -189,6 +189,25 @@ def delete_user_data(db: Session, user_id: str) -> dict:
     from sqlalchemy.orm.attributes import flag_modified
     flag_modified(profile, "privacy_settings")
 
+    # Also clear profile-stored personal data blobs so "Delete My Data"
+    # actually wipes user content from DB while keeping account identity.
+    profile.bio = None
+    profile.major = None
+    profile.university = None
+    profile.graduation_year = None
+    profile.current_status = None
+    profile.linkedin_url = None
+    profile.github_url = None
+    profile.years_of_experience = None
+    profile.certifications = []
+    profile.languages = []
+    profile.projects = []
+    profile.experiences = []
+    flag_modified(profile, "certifications")
+    flag_modified(profile, "languages")
+    flag_modified(profile, "projects")
+    flag_modified(profile, "experiences")
+
     db.commit()
 
     # Storage cleanup runs AFTER the DB commit, so a Storage hiccup
@@ -245,8 +264,18 @@ def delete_user_account(db: Session, user_id: str) -> dict:
     except Exception as e:
         wipe_result["storage_warning"] = str(e)
 
-    # The big one. CASCADE on profiles.id → auth.users.id handles the
-    # profile row deletion automatically.
+    # The big one. In environments where profiles.id has FK CASCADE to
+    # auth.users.id this removes the profile automatically.
     delete_auth_user(user_id)
+
+    # Defensive cleanup for environments without FK CASCADE wiring:
+    # explicitly remove the profile row if it still exists.
+    remaining_profile = db.get(Profile, uid)
+    if remaining_profile is not None:
+        db.delete(remaining_profile)
+        db.commit()
+        wipe_result["counts"]["profile_deleted"] = 1
+    else:
+        wipe_result["counts"]["profile_deleted"] = 0
 
     return wipe_result
