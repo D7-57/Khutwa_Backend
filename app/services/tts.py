@@ -9,7 +9,7 @@ client = OpenAI(api_key=settings.OPENAI_API_KEY)
 # practice tool — the trade-off is worth the 5-10x latency drop. tts-1-hd is
 # available if quality ever becomes the bottleneck.
 TTS_MODEL = "tts-1"
-
+# gpt-4o-mini-tts
 
 def synthesize_question_audio(text: str, language: str = "en") -> bytes:
     """
