@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# ── existing routers ──-
+# ── existing routers ──
 from app.routers.health import router as health_router
 from app.routers.interviews import router as interviews_router
 from app.routers.interview.community import router as community_questions_router
