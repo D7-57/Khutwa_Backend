@@ -61,6 +61,7 @@ from app.services.ai_interview import (
     evaluate_intro,
     evaluate_and_decide,
     generate_cv_questions,
+    generate_ai_questions,
     classify_user_input,
     generate_brief_explanation,
     pick_intro,
@@ -128,7 +129,7 @@ DIFFICULTY_RANGES: dict[str, tuple[int, int]] = {
 class StartInterviewRequest(BaseModel):
     role_name: str
     num_questions: int = 5
-    followup_max: int = 1
+    followup_max: int = 2
     question_source: str = "bank"
     tech_ratio: int = 50
     company: str | None = None
@@ -137,6 +138,10 @@ class StartInterviewRequest(BaseModel):
     is_rapid: bool = False
     # NEW: 'free' | 'focused'
     practice_mode: str = "free"
+    # NEW: when False, skip the "general/icebreaker" slots in the mix and
+    # redistribute them to tech/soft. Friend's complaint: the same 1-2
+    # general questions ("tell me about yourself" etc.) felt repetitive.
+    include_general: bool = True
     # NEW: 'ar' | 'en' (any of three names accepted from the client, see
     # /start handler for query-string fallbacks).
     language: str | None = None
@@ -174,12 +179,16 @@ def start_interview(
     if practice_mode not in ("free", "focused"):
         practice_mode = "free"
 
-    # Focused practice gating: require enough finished sessions of signal.
+    # Focused practice gating: require enough finished sessions of signal
+    # *for this specific role*. Bug fix v3.3.2 — was counting all roles,
+    # so a user who had 3 finished Backend interviews could unlock focused
+    # for a fresh Data Scientist role with no signal at all.
     if practice_mode == "focused":
         finished_count = (
             db.query(InterviewSession)
             .filter(
                 InterviewSession.user_id == uid,
+                InterviewSession.role_name == body.role_name,
                 # Both 'finished' and 'outro' are terminal in this codebase —
                 # natural completion routes through 'outro', finalize-early
                 # and rapid-submit go to 'finished'. Count both.
@@ -278,6 +287,7 @@ def start_interview(
             question_id=qdata.get("question_id"),
             question_text=qdata.get("question_text"),
             question_type=qdata["question_type"],
+            source=qdata.get("source", "bank"),
         )
         db.add(sq)
         db.flush()
@@ -327,6 +337,8 @@ def _config_dict(body: StartInterviewRequest, count: int, practice_mode: str) ->
         "is_rapid": body.is_rapid,
         "num_questions": count,
         "practice_mode": practice_mode,
+        "include_general": body.include_general,
+        "followup_max": body.followup_max,
     }
 
 
@@ -384,6 +396,17 @@ def _get_weak_question_ids(
 #  QUESTION MIX BUILDER
 # ─────────────────────────────────────────
 
+def _ai_question_to_item(q: dict) -> dict:
+    """Wrap an AI-generated question in the same shape `_select_from_bank` returns."""
+    return {
+        "question_id": None,
+        "question_text": q["question_text"],
+        "display_text": q["question_text"],
+        "question_type": q.get("question_type", "general"),
+        "source": "ai_generated",
+    }
+
+
 def _build_question_mix(
     db: Session,
     body: StartInterviewRequest,
@@ -392,6 +415,23 @@ def _build_question_mix(
     weak_question_ids: set[UUID] | None = None,
     experience_band: str | None = None,
 ) -> list[dict]:
+    """
+    Build the full question list for a session.
+
+    The mix is driven by three knobs from `body`:
+      - question_source: "bank" / "ai" / "mix"
+      - tech_ratio: 0-100, share of technical questions vs soft/behavioral
+      - include_general: whether to spend slots on "general/icebreaker" questions
+
+    Selection rules (v3.3):
+      - bank → pull from the questions table first; top up with AI if bank
+               can't supply enough. Tech/soft split is honored against the
+               bank pool, with AI filling whichever side fell short.
+      - ai   → all AI-generated. Bank is skipped entirely.
+      - mix  → half from bank, half AI-generated.
+
+    CV-based questions are layered on top in all three modes when use_cv=True.
+    """
     num = body.num_questions
     mix = QUESTION_MIX.get(num)
     if not mix:
@@ -403,19 +443,16 @@ def _build_question_mix(
     if not body.use_cv:
         n_bank += n_cv
         n_cv = 0
+    # When the user opts out of general questions, those slots go to tech/soft
+    # instead of disappearing.
+    if not body.include_general:
+        n_bank += n_general
+        n_general = 0
 
-    # ── 1. General questions from bank ──
-    general_qs = _select_from_bank(
-        db, body.role_name, language, user_id,
-        question_type="general",
-        count=n_general,
-        company=body.company,
-        weak_question_ids=weak_question_ids,
-        experience_band=experience_band,
-    )
+    source = (body.question_source or "bank").strip().lower()
 
-    # ── 2. CV-based questions ──
-    cv_qs = []
+    # ── 1. CV-based questions (always AI-generated when use_cv=True) ──
+    cv_qs: list[dict] = []
     if n_cv > 0:
         cv_summary = _get_cv_summary(db, user_id)
         if cv_summary:
@@ -434,42 +471,122 @@ def _build_question_mix(
                     "question_type": cq.get("question_type", "technical"),
                     "source": "cv_generated",
                 })
+        # If CV generation under-delivered, give the slots back to the main mix.
         if len(cv_qs) < n_cv:
             n_bank += (n_cv - len(cv_qs))
 
-    # ── 3. Tech/behavioral from bank ──
-    num_tech = round(n_bank * body.tech_ratio / 100)
-    num_soft = n_bank - num_tech
+    # Decide how many of the main slots come from bank vs AI, given the source.
+    if source == "ai":
+        bank_quota = 0
+    elif source == "mix":
+        bank_quota = (n_general + n_bank) // 2
+    else:  # "bank" or anything unrecognized
+        bank_quota = n_general + n_bank
+    ai_quota = (n_general + n_bank) - bank_quota
 
-    exclude_ids = {q["question_id"] for q in general_qs if q["question_id"]}
+    # ── 2. General slots — pulled from whichever side has quota ──
+    general_qs: list[dict] = []
+    if n_general > 0:
+        if bank_quota >= n_general:
+            general_qs = _select_from_bank(
+                db, body.role_name, language, user_id,
+                question_type="general",
+                count=n_general,
+                company=body.company,
+                weak_question_ids=weak_question_ids,
+                experience_band=experience_band,
+            )
+            bank_quota -= n_general
+            # If bank fell short on general, top up with AI (using the ai_quota pool).
+            shortfall = n_general - len(general_qs)
+            if shortfall > 0:
+                ai_quota += shortfall
+        else:
+            # Source is AI or bank quota too low — generate via AI.
+            ai_quota_needed = n_general
+            ai_general = generate_ai_questions(
+                role=body.role_name,
+                language=language,
+                count=ai_quota_needed,
+                tech_ratio=0,  # bias toward soft/general
+                company=body.company,
+            )
+            for q in ai_general:
+                general_qs.append(_ai_question_to_item(q))
+            ai_quota -= len(general_qs)
+            if ai_quota < 0:
+                ai_quota = 0
 
-    tech_qs = _select_from_bank(
-        db, body.role_name, language, user_id,
-        question_type="technical",
-        count=num_tech,
-        company=body.company,
-        exclude_ids=exclude_ids,
-        weak_question_ids=weak_question_ids,
-        experience_band=experience_band,
-    )
+    # ── 3. Main slots — tech/soft split, bank quota first then AI ──
+    remaining = n_bank
+    num_tech = round(remaining * body.tech_ratio / 100)
+    num_soft = remaining - num_tech
 
-    exclude_ids.update(q["question_id"] for q in tech_qs if q["question_id"])
+    exclude_ids: set = {q["question_id"] for q in general_qs if q.get("question_id")}
 
-    soft_qs = _select_from_bank(
-        db, body.role_name, language, user_id,
-        question_type=None,
-        count=num_soft,
-        company=body.company,
-        exclude_ids=exclude_ids,
-        soft_types=True,
-        weak_question_ids=weak_question_ids,
-        experience_band=experience_band,
-    )
+    # Bank pulls — capped by bank_quota
+    bank_tech_want = min(num_tech, bank_quota)
+    bank_soft_want = min(num_soft, bank_quota - bank_tech_want)
+    bank_tech: list[dict] = []
+    bank_soft: list[dict] = []
 
-    bank_qs = tech_qs + soft_qs
+    if bank_tech_want > 0:
+        bank_tech = _select_from_bank(
+            db, body.role_name, language, user_id,
+            question_type="technical",
+            count=bank_tech_want,
+            company=body.company,
+            exclude_ids=exclude_ids,
+            weak_question_ids=weak_question_ids,
+            experience_band=experience_band,
+        )
+        exclude_ids.update(q["question_id"] for q in bank_tech if q.get("question_id"))
+
+    if bank_soft_want > 0:
+        bank_soft = _select_from_bank(
+            db, body.role_name, language, user_id,
+            question_type=None,
+            count=bank_soft_want,
+            company=body.company,
+            exclude_ids=exclude_ids,
+            soft_types=True,
+            weak_question_ids=weak_question_ids,
+            experience_band=experience_band,
+        )
+
+    # Bank shortfalls (and the AI quota share) get filled by AI generation.
+    # This is what fixes the "I asked for 100% tech but got soft" bug: if the
+    # bank doesn't have enough approved tech questions for the role, AI tops up.
+    tech_shortfall = num_tech - len(bank_tech) - max(0, ai_quota * num_tech // max(remaining, 1))
+    soft_shortfall = num_soft - len(bank_soft) - max(0, ai_quota - (ai_quota * num_tech // max(remaining, 1)))
+
+    # Simpler accounting: figure out how many of each type we still need after
+    # the bank pulls and then ask the AI generator for that exact split.
+    tech_still_needed = max(0, num_tech - len(bank_tech))
+    soft_still_needed = max(0, num_soft - len(bank_soft))
+    ai_main_total = tech_still_needed + soft_still_needed
+
+    ai_main: list[dict] = []
+    if ai_main_total > 0:
+        ai_tech_ratio = (
+            round(tech_still_needed * 100 / ai_main_total) if ai_main_total else 50
+        )
+        raw_ai = generate_ai_questions(
+            role=body.role_name,
+            language=language,
+            count=ai_main_total,
+            tech_ratio=ai_tech_ratio,
+            company=body.company,
+        )
+        for q in raw_ai:
+            ai_main.append(_ai_question_to_item(q))
+
+    bank_qs = bank_tech + bank_soft + ai_main
     random.shuffle(bank_qs)
     random.shuffle(cv_qs)
 
+    # Interleave: general first (they read like icebreakers), then alternate
+    # CV/bank so the user doesn't get a streak of the same source.
     result = list(general_qs)
     ci, bi = 0, 0
     while ci < len(cv_qs) or bi < len(bank_qs):
@@ -866,6 +983,28 @@ def get_interview_analytics(user_id: str = Depends(get_current_user_id), db: Ses
         .count()
     )
 
+    # v3.3.2: per-role unlock map. Focused mode draws weak-question signal
+    # from a user's history *for that specific role*, so the unlock threshold
+    # has to be enforced per-role too — switching from "Backend Developer" to
+    # "Data Scientist" should re-lock until the user has 3 finished interviews
+    # in the new role.
+    per_role_rows = (
+        db.query(
+            InterviewSession.role_name,
+            func.count(InterviewSession.id).label("cnt"),
+        )
+        .filter(
+            InterviewSession.user_id == uid,
+            InterviewSession.phase.in_(["finished", "outro"]),
+        )
+        .group_by(InterviewSession.role_name)
+        .all()
+    )
+    finished_per_role = {row.role_name: int(row.cnt) for row in per_role_rows if row.role_name}
+    focused_unlocked_per_role = {
+        role: cnt >= MIN_SESSIONS_FOR_FOCUSED for role, cnt in finished_per_role.items()
+    }
+
     return {
         "total_sessions": len(sessions),
         "score_trend": score_trend,
@@ -876,8 +1015,14 @@ def get_interview_analytics(user_id: str = Depends(get_current_user_id), db: Ses
         "recent_avg": recent_avg,
         "improvement": improvement,
         # NEW: tells the Flutter setup screen whether to enable Focused mode.
+        # Kept as the legacy "any-role" view for backward compat; the new
+        # `focused_unlocked_per_role` map should be preferred when present.
         "focused_unlocked": finished_count >= MIN_SESSIONS_FOR_FOCUSED,
         "finished_count": finished_count,
+        # v3.3.2: per-role unlock state. Frontend should look up its current
+        # role here, not rely on `focused_unlocked`.
+        "focused_unlocked_per_role": focused_unlocked_per_role,
+        "finished_per_role": finished_per_role,
     }
 
 
@@ -1465,7 +1610,10 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
 
         if clarify_count >= MAX_CLARIFY:
             exhaust_msg = CLARIFY_EXHAUSTED_TEXT.get(language, CLARIFY_EXHAUSTED_TEXT["en"])
-            exhaust_prompt = exhaust_msg + f"\n\n{eval_question_text}"
+            # v3.3.2: don't re-append the original question. TTS times out on
+            # combined text (>60 words) because the audio synthesis endpoint
+            # has a 10s ceiling. The user already heard the question.
+            exhaust_prompt = exhaust_msg
             db.commit()
             return {
                 "phase": "bank", "action": "clarify_exhausted",
@@ -1479,7 +1627,9 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
         if clarification_response:
             sq.evaluation_json = {**sq.evaluation_json, "clarify_count": clarify_count + 1}
             db.flush()
-            clarify_prompt = clarification_response + f"\n\n{eval_question_text}"
+            # v3.3.2: same as above — speak only the clarification. The user
+            # has the question text visible on screen and just heard it.
+            clarify_prompt = clarification_response
             db.commit()
             return {
                 "phase": "bank", "action": "clarify",
@@ -1492,11 +1642,16 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
     if classification.get("type") == "curiosity":
         curiosity_response = classification.get("response", "")
         if curiosity_response:
+            # v3.3: curiosity (admitted + asked to be taught) caps lower than
+            # the prior 40. 25 base + 5 bonus = 30 — sits inside admitted_
+            # ignorance's 20-30 band, plus a small bonus for growth-mindset.
             CURIOSITY_BONUS = 5
+            CURIOSITY_BASE = 25
             if not sq.evaluation_json:
                 sq.evaluation_json = {"attempts": []}
             curiosity_eval = {
-                "score": 35, "answer_type": "admitted_ignorance",
+                "score": CURIOSITY_BASE,
+                "answer_type": "admitted_ignorance",
                 "final_feedback": "Great curiosity! Asking to learn shows strong growth mindset.",
                 "correct_answer": curiosity_response,
             }
@@ -1508,7 +1663,7 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
                 ],
             }
             sq.user_answer = sq.user_answer or answer
-            sq.score = 35 + CURIOSITY_BONUS
+            sq.score = CURIOSITY_BASE + CURIOSITY_BONUS
             sq.ai_feedback = curiosity_eval["final_feedback"]
             s.followup_count = 0
             db.flush()
@@ -1555,6 +1710,90 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
     action = result.get("action", "next")
     followup_q = (result.get("follow_up_question") or "").strip()
     answer_type = result.get("answer_type", "answered")
+    score = int(result.get("score", 0) or 0)
+
+    # ─────────────────────────────────────────────────────
+    # v3.3: Follow-up policy
+    # ─────────────────────────────────────────────────────
+    # The LLM proposes follow-ups based on score; we apply structural rules
+    # the LLM can't see (session budget, cooldown, question category, prior
+    # follow-up state). Final word lives here, not in the model.
+    #
+    # Rules:
+    #   1. Never follow-up on a general / icebreaker question.
+    #   2. Never follow-up on an answer that wasn't a real attempt
+    #      (admitted_ignorance, off_topic, partial). Re-asking someone who
+    #      already said "I don't know" feels bad.
+    #   3. Session budget: at most 2 follow-ups across the whole interview.
+    #   4. Cooldown: if the previous question got a follow-up, don't ask one
+    #      on this question. Prevents three follow-ups in a row feeling like
+    #      an interrogation.
+    #   5. We're already inside a follow-up (is_followup_answer=True) — no
+    #      nested follow-ups.
+    #
+    # If those gates pass and the LLM said "next" but score is in the
+    # follow-up band (40-65, answered), we OVERRIDE to follow_up and
+    # synthesize a question.
+
+    def _followups_allowed() -> bool:
+        # Don't pile follow-up on an already-follow-up turn.
+        if is_followup_answer:
+            return False
+        # No follow-ups on general / icebreaker questions.
+        if (q_type or "").strip().lower() == "general":
+            return False
+        # No follow-ups on weak attempt classes — they already said they
+        # don't know or went off-topic; the kind thing is to move on.
+        if answer_type in ("admitted_ignorance", "off_topic", "partial"):
+            return False
+        # Session budget: cap at 2 follow-ups total across the interview.
+        prior_followups = sum(
+            1
+            for prior_sq in (
+                db.query(SessionQuestion)
+                .filter(SessionQuestion.session_id == s.id, SessionQuestion.id != sq.id)
+                .all()
+            )
+            for att in (prior_sq.evaluation_json or {}).get("attempts", [])
+            if att.get("action") == "follow_up"
+        )
+        if prior_followups >= 2:
+            return False
+        # Cooldown: skip if previous question already got one.
+        prev_idx = s.current_index - 1
+        if prev_idx >= 0:
+            prev_sq = (
+                db.query(SessionQuestion)
+                .filter(SessionQuestion.session_id == s.id)
+                .order_by(SessionQuestion.id)
+                .offset(prev_idx)
+                .limit(1)
+                .first()
+            )
+            if prev_sq:
+                prev_attempts = (prev_sq.evaluation_json or {}).get("attempts", [])
+                if any(att.get("action") == "follow_up" for att in prev_attempts):
+                    return False
+        return True
+
+    in_followup_band = (
+        answer_type == "answered" and 40 <= score <= 65
+    )
+
+    if action == "follow_up" and not _followups_allowed():
+        # LLM wanted to follow up but our policy says no. Drop to next.
+        action = "next"
+        followup_q = ""
+    elif action != "follow_up" and in_followup_band and _followups_allowed():
+        # LLM said "next" but our rules say this answer deserves a follow-up.
+        # Override and synthesize a question if the LLM didn't supply one.
+        action = "follow_up"
+        if not followup_q:
+            followup_q = (
+                "Can you walk me through a specific time you applied this?"
+                if language != "ar"
+                else "هل يمكنك أن تشاركني موقفاً محدداً طبّقت فيه هذه الفكرة؟"
+            )
 
     if not sq.evaluation_json: sq.evaluation_json = {"attempts": []}
     attempt = {"answer": answer, "evaluation": evaluation, "action": action}

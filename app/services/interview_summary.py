@@ -60,7 +60,21 @@ def build_interview_summary(
 
     for sq in sqs:
         q_obj = None
-        if sq.question_text:
+        # v3.3.2: source now lives on the SessionQuestion row. Old rows
+        # (before the column was added) won't have it — fall back to the
+        # text-vs-id heuristic for those, which still works for the
+        # CV/bank case but mis-attributes AI to CV. That's acceptable for
+        # backward compat.
+        if sq.source:
+            q_source = sq.source
+            if sq.question_text:
+                q_text = sq.question_text
+            elif sq.question_id:
+                q_obj = db.get(Question, sq.question_id)
+                q_text = q_obj.get_text(language) if q_obj else ""
+            else:
+                q_text = ""
+        elif sq.question_text:
             q_text = sq.question_text
             q_source = "cv_generated"
         elif sq.question_id:

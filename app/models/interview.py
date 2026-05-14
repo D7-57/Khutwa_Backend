@@ -88,6 +88,11 @@ class SessionQuestion(Base):
 
     question_type: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # v3.3.2: per-question source — distinguishes AI-generated from CV-generated
+    # since both have question_id=NULL. Values: 'bank' | 'ai_generated' | 'cv_generated'.
+    # Nullable for migration backward-compat with rows written before this column existed.
+    source: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     user_answer: Mapped[str | None] = mapped_column(Text, nullable=True)
     ai_feedback: Mapped[str | None] = mapped_column(Text, nullable=True)
     score: Mapped[int | None] = mapped_column(Integer, nullable=True)

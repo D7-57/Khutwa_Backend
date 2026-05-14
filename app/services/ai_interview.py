@@ -304,7 +304,11 @@ STEP 2 — SCORE based on type:
 - answered → score fairly: mostly correct with minor gaps = 60-75, solid = 75-90, exceptional = 90+.
   But if the answer is factually WRONG or shows misunderstanding, score 25-45 even if confident.
 - partial → 30-55 credit based on how close their guess was
-- admitted_ignorance → 20-40 for honesty, provide correct answer in correct_answer
+- admitted_ignorance → 20-30 baseline. Specifically:
+    * Pure "I don't know" (no engagement) → 20
+    * "I don't know but I'd guess X" (admits + attempts) → 25-30
+    * "I don't know but can you explain?" (admits + curiosity, no attempt) → 25
+  Always provide a strong correct_answer when admitted_ignorance.
 - off_topic → 0-15, action = "re_ask"
 
 SCORING PHILOSOPHY: Reward genuine understanding, not just confidence. A hesitant but correct
@@ -321,10 +325,17 @@ even if they answered well. This is the gold standard the candidate can compare 
 STEP 5 — DECIDE action:
 - admitted_ignorance → "next" (don't drill into what they don't know)
 - off_topic → "re_ask"
-- partial → "next" (credit them, move on)
-- answered + score < 45 → "follow_up"
-- answered + score >= 65 → "next"
-- answered + 45-65 → judgment call, prefer "next" for pace
+- partial + score < 65 → "follow_up" (ask a probing question that nudges them to be more complete)
+- partial + score >= 65 → "next" (they got close enough, move on)
+- answered + score < 45 → "follow_up" (the answer was weak — ask them to clarify the part that fell short)
+- answered + score 45-70 → "follow_up" (ask for a concrete example: "Can you walk me through a specific time you did this?")
+- answered + score > 70 → "next" (strong enough, don't slow the pace)
+
+When you decide "follow_up", `follow_up_question` MUST be:
+- specific to THIS question and THIS answer (not a generic "tell me more")
+- a single sentence ending in a question mark
+- for partial/weak answers: aim at what was missing (e.g. "What would you do if X happened?")
+- for middling answers: ask for a concrete example (e.g. "Can you share a specific time you used this approach?")
 {type_guidance}
 
 Question type: {question_type}
@@ -367,7 +378,8 @@ Answer: \"\"\"{answer}\"\"\""""
     at = result["answer_type"]
     s = result["score"]
     if at == "admitted_ignorance":
-        result["score"] = max(20, min(40, s)) if s > 0 else 25
+        # Tightened from 20-40 → 20-30. "I don't know but explain it" = 25.
+        result["score"] = max(20, min(30, s)) if s > 0 else 25
     elif at == "off_topic":
         result["score"] = min(15, s)
     elif at == "partial":
@@ -471,6 +483,39 @@ def _looks_like_full_answer(text: str, question: str) -> bool:
     return False
 
 
+def _looks_like_echo(response: str, user_text: str) -> bool:
+    """
+    Heuristic to catch the 'clarification parrots the user' bug.
+
+    When the user asks for clarification (e.g. "could you explain what you mean
+    by X?"), the LLM sometimes just re-emits that same question almost verbatim
+    instead of actually clarifying. We detect this by measuring word overlap
+    between the response and the user's input.
+
+    Triggers:
+      - 60%+ of the user's words appear (in order) in the response, AND
+      - response is short enough that this overlap is meaningful (not a
+        long teaching response that happens to mention some of those words).
+    """
+    r = (response or "").strip().lower()
+    u = (user_text or "").strip().lower()
+    if not r or not u:
+        return False
+
+    # Tokenize on non-letter chars, keep words >= 3 chars (drops "the", "you", etc.
+    # less informative — we want content words).
+    import re
+    user_words = [w for w in re.split(r"[^\wء-ي]+", u) if len(w) >= 4]
+    if len(user_words) < 4:
+        # Too few content words to meaningfully measure overlap.
+        return False
+
+    # Count how many user content words appear anywhere in the response.
+    hits = sum(1 for w in user_words if w in r)
+    overlap = hits / len(user_words)
+    return overlap >= 0.6
+
+
 def classify_user_input(
     user_text: str,
     current_question: str,
@@ -510,11 +555,24 @@ CRITICAL RULES FOR "clarification":
 - DO NOT answer the question.
 - DO NOT explain the underlying concept.
 - DO NOT define technical terms.
-- DO restate the question in simpler words OR clarify the scope ("are you asking
+- DO NOT echo or paraphrase the candidate's own clarifying question back at them.
+- DO restate the interviewer's question in simpler words OR narrow the scope ("are you asking
   about implementation or about trade-offs?").
 - DO point out what category of answer is expected ("a brief example from your
   experience"; "a high-level definition is fine").
 - Keep response 1-2 sentences, max 40 words.
+- Speak AS THE INTERVIEWER would, not as a chatbot.
+
+Worked example (good clarification):
+  Question asked:    "How would you design a RESTful API for a microservices architecture?"
+  Candidate said:    "Could you explain what you mean by microservices?"
+  BAD response:      "Could you explain what you mean by microservices? I'm not sure how it relates."
+                     (this echoes the candidate — useless)
+  BAD response:      "Microservices are an architectural style where..."
+                     (this teaches — that's curiosity, not clarification)
+  GOOD response:     "I'm asking how you'd structure your API endpoints and data flow when
+                     your application is split across multiple small services. A high-level
+                     design is fine."
 
 If the response would teach them what to say, you are doing it wrong — that's
 "curiosity", not "clarification". Pick the right category.
@@ -543,13 +601,15 @@ Return ONLY JSON:
         if rtype not in ("answer", "clarification", "curiosity"):
             return {"type": "answer"}
 
-        # ── Post-check: did the "clarification" leak the answer? ──
+        # ── Post-check: did the "clarification" leak the answer or echo the user? ──
         if rtype == "clarification":
             response = (result.get("response") or "").strip()
             if not response:
                 return {"type": "answer"}
-            if _looks_like_full_answer(response, current_question):
-                # Replace with a safe generic hint instead of letting it through.
+            # Either failure mode (teaching the answer OR parroting the user)
+            # falls back to the same safe generic hint.
+            if _looks_like_full_answer(response, current_question) or \
+               _looks_like_echo(response, user_text):
                 result["response"] = _CLARIFY_FALLBACK.get(
                     language, _CLARIFY_FALLBACK["en"]
                 )
