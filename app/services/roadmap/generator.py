@@ -35,6 +35,198 @@ client = OpenAI(api_key=settings.OPENAI_API_KEY)
 
 MAX_ROADMAPS_PER_USER = 3
 
+# Role-aware standard certification shortlist used to guide AI suggestions.
+# We keep this concise and recognizable across hiring markets.
+STANDARD_CERTS_BY_ROLE_KEYWORD: dict[str, list[str]] = {
+    "siem": [
+        "SC-200 (Microsoft Security Operations Analyst)",
+        "CompTIA CySA+",
+        "Splunk Core Certified User",
+        "Elastic Certified Analyst",
+    ],
+    "blue team": [
+        "BTL1 (Blue Team Level 1)",
+        "eCIR",
+        "CompTIA CySA+",
+        "SC-200 (Microsoft Security Operations Analyst)",
+    ],
+    "incident": [
+        "eCIR",
+        "GCFA (GIAC Certified Forensic Analyst)",
+        "BTL1 (Blue Team Level 1)",
+        "SC-200 (Microsoft Security Operations Analyst)",
+    ],
+    "threat": [
+        "SC-200 (Microsoft Security Operations Analyst)",
+        "BTL1 (Blue Team Level 1)",
+        "CompTIA CySA+",
+    ],
+    "pentest": [
+        "eJPT",
+        "PNPT",
+        "OSCP",
+        "CompTIA PenTest+",
+    ],
+    "red team": [
+        "PNPT",
+        "OSCP",
+        "CRTO (Certified Red Team Operator)",
+    ],
+    "soc": [
+        "CompTIA Security+",
+        "eJPT",
+        "BTL1 (Blue Team Level 1)",
+        "eCIR",
+        "CompTIA CySA+",
+        "SC-200 (Microsoft Security Operations Analyst)",
+    ],
+    "cyber": [
+        "CompTIA Security+",
+        "eJPT",
+        "BTL1 (Blue Team Level 1)",
+        "eCIR",
+        "CompTIA CySA+",
+        "PNPT",
+        "OSCP",
+        "SC-200 (Microsoft Security Operations Analyst)",
+    ],
+    "security": [
+        "CompTIA Security+",
+        "eJPT",
+        "BTL1 (Blue Team Level 1)",
+        "eCIR",
+        "CompTIA CySA+",
+        "PNPT",
+        "OSCP",
+        "SC-200 (Microsoft Security Operations Analyst)",
+    ],
+    "cloud": [
+        "AWS Certified Solutions Architect – Associate",
+        "AWS Certified Developer – Associate",
+        "AZ-104 (Azure Administrator Associate)",
+        "AZ-305 (Azure Solutions Architect Expert)",
+        "Google Professional Cloud Architect",
+        "CKA (Certified Kubernetes Administrator)",
+    ],
+    "devops": [
+        "AWS Certified DevOps Engineer – Professional",
+        "Docker Certified Associate",
+        "CKA (Certified Kubernetes Administrator)",
+        "HashiCorp Terraform Associate",
+        "AZ-400 (Designing and Implementing Microsoft DevOps Solutions)",
+    ],
+    "data": [
+        "PL-300 (Microsoft Power BI Data Analyst)",
+        "DP-203 (Azure Data Engineer Associate)",
+        "AWS Certified Data Engineer – Associate",
+        "Google Professional Data Engineer",
+        "Databricks Certified Data Engineer Associate",
+    ],
+    "analytics": [
+        "PL-300 (Microsoft Power BI Data Analyst)",
+        "Google Data Analytics Professional Certificate",
+        "Tableau Certified Data Analyst",
+    ],
+    "software": [
+        "AWS Certified Developer – Associate",
+        "AZ-204 (Azure Developer Associate)",
+        "Oracle Certified Professional: Java SE",
+        "PCAP (Certified Associate in Python Programming)",
+    ],
+    "network": [
+        "Cisco CCNA",
+        "Cisco CCNP Enterprise",
+        "CompTIA Network+",
+    ],
+    "product": [
+        "PSPO I (Professional Scrum Product Owner)",
+        "CSPO (Certified Scrum Product Owner)",
+        "Pragmatic Institute Product Certifications",
+    ],
+    "project": [
+        "PMP (Project Management Professional)",
+        "CAPM (Certified Associate in Project Management)",
+        "PRINCE2 Practitioner",
+    ],
+}
+
+# Skill-level cert guidance (cross-role). This helps map specific gaps
+# like "threat hunting" to relevant professional certs.
+STANDARD_CERTS_BY_SKILL_KEYWORD: dict[str, list[str]] = {
+    "threat hunting": [
+        "eCTHP (Certified Threat Hunting Professional)",
+        "BTL1 (Blue Team Level 1)",
+        "SC-200 (Microsoft Security Operations Analyst)",
+    ],
+    "incident response": [
+        "eCIR",
+        "GCFA (GIAC Certified Forensic Analyst)",
+        "SC-200 (Microsoft Security Operations Analyst)",
+    ],
+    "siem": [
+        "SC-200 (Microsoft Security Operations Analyst)",
+        "Splunk Core Certified User",
+        "Elastic Certified Analyst",
+    ],
+    "digital forensics": [
+        "GCFA (GIAC Certified Forensic Analyst)",
+        "CHFI (Computer Hacking Forensic Investigator)",
+    ],
+    "cloud security": [
+        "CCSP (Certified Cloud Security Professional)",
+        "AZ-500 (Azure Security Engineer Associate)",
+        "AWS Certified Security – Specialty",
+    ],
+    "machine learning": [
+        "TensorFlow Developer Certificate",
+        "AWS Certified Machine Learning – Specialty",
+    ],
+    "data engineering": [
+        "DP-203 (Azure Data Engineer Associate)",
+        "Google Professional Data Engineer",
+        "Databricks Certified Data Engineer Associate",
+    ],
+    "project management": [
+        "PMP (Project Management Professional)",
+        "CAPM (Certified Associate in Project Management)",
+    ],
+    "business analysis": [
+        "CBAP (Certified Business Analysis Professional)",
+        "PMI-PBA (Professional in Business Analysis)",
+    ],
+}
+
+# Alias map for certification matching so we don't re-suggest an already
+# earned cert just because of formatting differences.
+CERT_ALIAS_MAP: dict[str, set[str]] = {
+    "CompTIA Security+": {"security+", "sec+", "comptia security+"},
+    "eJPT": {"ejpt", "ejptv2", "elearn ejpt", "e jpt"},
+    "BTL1 (Blue Team Level 1)": {"btl1", "blue team level 1", "security blue team level 1"},
+    "eCIR": {"ecir", "e cir", "ine ecir"},
+    "CompTIA CySA+": {"cysa+", "comptia cysa+", "cybersecurity analyst+"},
+    "SC-200 (Microsoft Security Operations Analyst)": {"sc-200", "microsoft sc-200"},
+    "CompTIA PenTest+": {"pentest+", "comptia pentest+", "pt0-002"},
+    "GCFA (GIAC Certified Forensic Analyst)": {"gcfa", "giac forensic analyst"},
+    "CRTO (Certified Red Team Operator)": {"crto", "certified red team operator"},
+    "Splunk Core Certified User": {"splunk core certified user", "splunk core user"},
+    "Elastic Certified Analyst": {"elastic certified analyst", "elastic analyst"},
+    "eCTHP (Certified Threat Hunting Professional)": {
+        "ecthp",
+        "e cthp",
+        "certified threat hunting professional",
+    },
+    "CHFI (Computer Hacking Forensic Investigator)": {
+        "chfi",
+        "computer hacking forensic investigator",
+    },
+    "CCSP (Certified Cloud Security Professional)": {"ccsp"},
+    "AZ-500 (Azure Security Engineer Associate)": {"az-500", "azure security engineer associate"},
+    "AWS Certified Security – Specialty": {"aws certified security specialty", "aws security specialty"},
+    "TensorFlow Developer Certificate": {"tensorflow developer certificate"},
+    "CBAP (Certified Business Analysis Professional)": {"cbap"},
+    "PMI-PBA (Professional in Business Analysis)": {"pmi-pba", "pmi pba"},
+}
+
 
 # ────────────────────────────────────────────────────────────
 #  PUBLIC API
@@ -220,7 +412,23 @@ def generate_roadmap(
         (skill_focus and skill_focus.strip()) or include_tangible_outcome
     )
 
-    if force_ai or user_provided_extras or (gap_names and not template):
+    # Personalization requirement:
+    # If the user has profile level signals (experience/certs/work history),
+    # prefer AI so roadmap depth matches their level instead of static template.
+    has_level_signals = bool(
+        profile.years_of_experience
+        or profile.current_status
+        or (profile.certifications and len(profile.certifications) > 0)
+        or (profile.experiences and len(profile.experiences) > 0)
+    )
+    prefer_ai_personalized = has_level_signals
+
+    if (
+        force_ai
+        or user_provided_extras
+        or prefer_ai_personalized
+        or (gap_names and not template)
+    ):
         roadmap_data = _generate_with_ai(
             role=role,
             profile=profile,
@@ -613,15 +821,9 @@ def _generate_with_ai(
     previously_covered_skills: list[str] | None = None,
     previously_covered_task_titles: list[str] | None = None,
 ) -> dict:
-    profile_context = {}
-    if profile.major:
-        profile_context["major"] = profile.major
-    if profile.university:
-        profile_context["university"] = profile.university
-    if profile.current_status:
-        profile_context["current_status"] = profile.current_status
-    if profile.graduation_year:
-        profile_context["graduation_year"] = profile.graduation_year
+    profile_context = _build_profile_context(profile, role.name, gap_names)
+    user_cert_names = _extract_certification_names(profile)
+    recommended_certs = list(profile_context.get("recommended_standard_certs") or [])
 
     user_prompt = build_roadmap_prompt(
         role_name=role.name,
@@ -660,7 +862,274 @@ def _generate_with_ai(
         else:
             raise RuntimeError("Failed to parse AI roadmap response")
 
+    _enforce_cert_milestones(
+        roadmap_data=data,
+        recommended_certs=recommended_certs,
+        user_cert_names=user_cert_names,
+        language=language,
+    )
+
     return data
+
+
+def _standard_certs_for_role(role_name: str) -> list[str]:
+    lower = (role_name or "").strip().lower()
+    if not lower:
+        return []
+
+    for key, certs in STANDARD_CERTS_BY_ROLE_KEYWORD.items():
+        if key in lower:
+            return certs
+    return []
+
+
+def _cert_aliases(cert_name: str) -> set[str]:
+    aliases = {cert_name.strip().lower()}
+    aliases.update(CERT_ALIAS_MAP.get(cert_name, set()))
+    return {a.strip().lower() for a in aliases if a and a.strip()}
+
+
+def _extract_certification_names(profile: Profile) -> list[str]:
+    raw = profile.certifications or []
+    names: list[str] = []
+    for item in raw:
+        name = ""
+        if isinstance(item, str):
+            name = item.strip()
+        elif isinstance(item, dict):
+            name = str(item.get("name") or "").strip()
+        if name:
+            names.append(name)
+
+    # dedupe while preserving order
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for n in names:
+        k = n.lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        ordered.append(n)
+    return ordered
+
+
+def _normalize_user_cert_tokens(cert_names: list[str]) -> set[str]:
+    tokens: set[str] = set()
+    for cert in cert_names:
+        c = cert.strip().lower()
+        if not c:
+            continue
+        tokens.add(c)
+        # Add compact variant for matching strings like "eJPT v2".
+        tokens.add(re.sub(r"[^a-z0-9+]", "", c))
+    return tokens
+
+
+def _normalize_token(text: str) -> str:
+    return re.sub(r"[^a-z0-9+]", "", (text or "").strip().lower())
+
+
+def _filter_unearned_certs(candidate_certs: list[str], user_cert_names: list[str]) -> list[str]:
+    user_tokens = _normalize_user_cert_tokens(user_cert_names)
+    filtered: list[str] = []
+    for cert in candidate_certs:
+        aliases = _cert_aliases(cert)
+        alias_tokens = set(aliases)
+        alias_tokens.update(re.sub(r"[^a-z0-9+]", "", a) for a in aliases)
+        if user_tokens.intersection(alias_tokens):
+            continue
+        filtered.append(cert)
+    return filtered
+
+
+def _recommended_certs_for_user(
+    role_name: str,
+    gap_names: list[str],
+    user_cert_names: list[str],
+) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    def _add_many(certs: list[str]):
+        for cert in certs:
+            key = cert.strip().lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            ordered.append(cert)
+
+    _add_many(_standard_certs_for_role(role_name))
+
+    gap_text = " ".join(gap_names or []).lower()
+    for kw, certs in STANDARD_CERTS_BY_SKILL_KEYWORD.items():
+        if kw in gap_text:
+            _add_many(certs)
+
+    return _filter_unearned_certs(ordered, user_cert_names)
+
+
+def _roadmap_text_mentions_cert(roadmap_data: dict, cert_name: str) -> bool:
+    aliases = _cert_aliases(cert_name)
+    compact_aliases = {_normalize_token(a) for a in aliases}
+
+    stages = roadmap_data.get("stages") or []
+    for stage in stages:
+        stage_text = " ".join(
+            [
+                str(stage.get("title") or ""),
+                str(stage.get("description") or ""),
+            ]
+        ).lower()
+        stage_compact = _normalize_token(stage_text)
+        if any(a in stage_text for a in aliases) or any(
+            a in stage_compact for a in compact_aliases
+        ):
+            return True
+
+        for task in stage.get("tasks") or []:
+            task_text = " ".join(
+                [
+                    str(task.get("title") or ""),
+                    str(task.get("description") or ""),
+                ]
+            ).lower()
+            task_compact = _normalize_token(task_text)
+            if any(a in task_text for a in aliases) or any(
+                a in task_compact for a in compact_aliases
+            ):
+                return True
+
+            for res in task.get("resources") or []:
+                res_text = " ".join(
+                    [
+                        str(res.get("title") or ""),
+                        str(res.get("search_query") or ""),
+                        str(res.get("url") or ""),
+                    ]
+                ).lower()
+                res_compact = _normalize_token(res_text)
+                if any(a in res_text for a in aliases) or any(
+                    a in res_compact for a in compact_aliases
+                ):
+                    return True
+    return False
+
+
+def _enforce_cert_milestones(
+    roadmap_data: dict,
+    recommended_certs: list[str],
+    user_cert_names: list[str],
+    language: str = "en",
+) -> None:
+    if not recommended_certs:
+        return
+
+    # Remove already-owned certs from candidate list defensively.
+    remaining = _filter_unearned_certs(recommended_certs, user_cert_names)
+    if not remaining:
+        return
+
+    missing = [
+        cert for cert in remaining if not _roadmap_text_mentions_cert(roadmap_data, cert)
+    ]
+    if not missing:
+        return
+
+    stages = roadmap_data.get("stages")
+    if not isinstance(stages, list):
+        roadmap_data["stages"] = []
+        stages = roadmap_data["stages"]
+
+    if language == "ar":
+        stage_title = "مسار الشهادات المهنية"
+        stage_desc = "التركيز على شهادات مهنية معترف بها في المجال مع تطبيق عملي."
+        task_title_tpl = "التحضير لشهادة {cert}"
+        task_desc_tpl = (
+            "أنشئ خطة مذاكرة واختبارات تجريبية ومختبرات عملية للحصول على {cert}."
+        )
+    else:
+        stage_title = "Professional Certification Track"
+        stage_desc = "Focus on recognized industry certifications with practical lab validation."
+        task_title_tpl = "Prepare for {cert}"
+        task_desc_tpl = (
+            "Build a study plan, exam-practice workflow, and hands-on labs for {cert}."
+        )
+
+    stage_order = len(stages) + 1
+    tasks: list[dict] = []
+    for i, cert in enumerate(missing[:2], 1):
+        tasks.append(
+            {
+                "order": i,
+                "title": task_title_tpl.format(cert=cert),
+                "description": task_desc_tpl.format(cert=cert),
+                "skill_name": None,
+                "resources": [
+                    {
+                        "type": "certification",
+                        "title": cert,
+                        "url": "",
+                        "search_query": f"{cert} official exam guide",
+                    },
+                    {
+                        "type": "documentation",
+                        "title": "Official objectives / blueprint",
+                        "url": "",
+                        "search_query": f"{cert} exam objectives",
+                    },
+                ],
+            }
+        )
+
+    stages.append(
+        {
+            "order": stage_order,
+            "title": stage_title,
+            "description": stage_desc,
+            "tasks": tasks,
+        }
+    )
+
+
+def _infer_experience_level(profile: Profile) -> str:
+    yoe = (profile.years_of_experience or "").strip()
+    cert_count = len(_extract_certification_names(profile))
+    exp_count = len(profile.experiences or [])
+
+    if yoe in {"3+"} or exp_count >= 2 or cert_count >= 3:
+        return "advanced"
+    if yoe in {"1", "2"} or exp_count >= 1 or cert_count >= 1:
+        return "intermediate"
+    return "beginner"
+
+
+def _build_profile_context(profile: Profile, role_name: str, gap_names: list[str] | None = None) -> dict:
+    ctx: dict = {}
+    if profile.major:
+        ctx["major"] = profile.major
+    if profile.university:
+        ctx["university"] = profile.university
+    if profile.current_status:
+        ctx["current_status"] = profile.current_status
+    if profile.graduation_year:
+        ctx["graduation_year"] = profile.graduation_year
+    if profile.years_of_experience:
+        ctx["years_of_experience"] = profile.years_of_experience
+
+    cert_names = _extract_certification_names(profile)
+    role_certs = _recommended_certs_for_user(
+        role_name=role_name,
+        gap_names=gap_names or [],
+        user_cert_names=cert_names,
+    )
+    if cert_names:
+        ctx["certifications"] = cert_names
+    if role_certs:
+        ctx["recommended_standard_certs"] = role_certs
+
+    ctx["experience_level"] = _infer_experience_level(profile)
+    ctx["role_name"] = role_name
+    return ctx
 
 
 def _personalize_template(
