@@ -8,7 +8,7 @@ client = OpenAI(api_key=settings.OPENAI_API_KEY)
 # tts-1 (speed model, ~1-3s per call). Quality is still good for an interview
 # practice tool — the trade-off is worth the 5-10x latency drop. tts-1-hd is
 # available if quality ever becomes the bottleneck.
-TTS_MODEL = "tts-1"
+TTS_MODEL = "gpt-4o-mini-tts"
 # gpt-4o-mini-tts
 
 def synthesize_question_audio(text: str, language: str = "en") -> bytes:
