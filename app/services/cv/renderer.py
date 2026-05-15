@@ -8,7 +8,7 @@ AVAILABLE_TEMPLATES = {
     "classic": {
         "file": "classic.html",
         "name": "Classic",
-        "description": "Traditional CV layout with serif font. Education first, then experience.",
+        "description": "Traditional CV layout with serif font. Summary first, then education.",
     },
     "fresh_graduate": {
         "file": "fresh_graduate.html",

@@ -44,6 +44,7 @@ body {
   font-size: 10.5pt;
   font-weight: bold;
   text-transform: uppercase;
+  text-align: center;
   border-bottom: 1pt solid #000;
   padding-bottom: 2pt;
   margin-bottom: 4pt;
@@ -125,6 +126,22 @@ ul.bullets li {
   </div>
 </div>
 
+<!-- EDUCATION -->
+{% if education %}
+<div class="section">
+  <div class="section-title">Education</div>
+  {% for edu in education %}
+  <div class="entry">
+    <div class="entry-header">
+      <span class="entry-title">{{ edu.degree }}{% if edu.major %} in {{ edu.major }}{% endif %}</span>
+      <span class="entry-date">{{ edu.start_date }}{% if edu.end_date %} - {{ edu.end_date }}{% endif %}</span>
+    </div>
+    <div class="entry-subtitle">{{ edu.institution }}</div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
 <!-- SUMMARY -->
 {% if summary %}
 <div class="section">
@@ -153,22 +170,6 @@ ul.bullets li {
       {% endfor %}
     </ul>
     {% endif %}
-  </div>
-  {% endfor %}
-</div>
-{% endif %}
-
-<!-- EDUCATION -->
-{% if education %}
-<div class="section">
-  <div class="section-title">Education</div>
-  {% for edu in education %}
-  <div class="entry">
-    <div class="entry-header">
-      <span class="entry-title">{{ edu.degree }}{% if edu.major %} in {{ edu.major }}{% endif %}</span>
-      <span class="entry-date">{{ edu.start_date }}{% if edu.end_date %} - {{ edu.end_date }}{% endif %}</span>
-    </div>
-    <div class="entry-subtitle">{{ edu.institution }}</div>
   </div>
   {% endfor %}
 </div>

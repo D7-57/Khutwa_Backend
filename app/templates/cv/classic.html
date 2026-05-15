@@ -54,6 +54,7 @@ body {
   font-size: 11pt;
   font-weight: bold;
   text-transform: uppercase;
+  text-align: center;
   border-bottom: 1.5pt solid #000;
   padding-bottom: 1pt;
   margin-bottom: 4pt;
@@ -123,22 +124,14 @@ ul.bullets li {
 
 /* ── skills ── */
 
-.skills-grid {
-  display: flex;
-  gap: 24pt;
-}
-
-.skills-col {
-  flex: 1;
-}
-
 .skills-label {
   font-weight: bold;
   font-size: 10pt;
 }
 
-.skills-list {
+.skills-line {
   font-size: 10pt;
+  margin-bottom: 3pt;
 }
 
 /* ── summary ── */
@@ -187,6 +180,14 @@ ul.bullets li {
   </div>
 </div>
 
+<!-- SUMMARY -->
+{% if summary %}
+<div class="section">
+  <div class="section-title">Summary</div>
+  <div class="summary-text">{{ summary }}</div>
+</div>
+{% endif %}
+
 <!-- EDUCATION -->
 {% if education %}
 <div class="section">
@@ -206,14 +207,6 @@ ul.bullets li {
     {% endif %}
   </div>
   {% endfor %}
-</div>
-{% endif %}
-
-<!-- SUMMARY / ABOUT ME -->
-{% if summary %}
-<div class="section">
-  <div class="section-title">About me</div>
-  <div class="summary-text">{{ summary }}</div>
 </div>
 {% endif %}
 
@@ -272,41 +265,27 @@ ul.bullets li {
 {% if skills_technical or skills_tools or skills_soft %}
 <div class="section">
   <div class="section-title">Skills &amp; Interests</div>
-  <div class="skills-grid">
-    <div class="skills-col">
-      {% if skills_technical %}
-      <div><span class="skills-label">Technical Skills:</span></div>
-        {% if programming_languages %}
-        <div class="skills-list"><span class="skills-label">Programming Languages:</span> {{ programming_languages | join(', ') }}</div>
-        {% endif %}
-        {% if tools_tech %}
-        <div class="skills-list"><span class="skills-label">Tools &amp; Technologies:</span> {{ tools_tech | join(', ') }}</div>
-        {% endif %}
-        {% if concepts %}
-        <div class="skills-list"><span class="skills-label">Concepts:</span> {{ concepts | join(', ') }}</div>
-        {% endif %}
-        {% if operating_systems %}
-        <div class="skills-list"><span class="skills-label">Operating Systems:</span> {{ operating_systems | join(', ') }}</div>
-        {% endif %}
-        {% if remaining_technical %}
-        <div class="skills-list">{{ remaining_technical | join(', ') }}</div>
-        {% endif %}
-      {% endif %}
-      {% if languages_spoken %}
-      <div class="skills-list"><span class="skills-label">Languages:</span> {{ languages_spoken | join(', ') }}</div>
-      {% endif %}
-    </div>
-    {% if skills_soft %}
-    <div class="skills-col">
-      <div><span class="skills-label">Soft skills:</span></div>
-      <ul class="bullets">
-        {% for sk in skills_soft %}
-        <li>{{ sk }}</li>
-        {% endfor %}
-      </ul>
-    </div>
-    {% endif %}
-  </div>
+  {% if programming_languages %}
+  <div class="skills-line"><span class="skills-label">Programming Languages:</span> {{ programming_languages | join(', ') }}</div>
+  {% endif %}
+  {% if tools_tech %}
+  <div class="skills-line"><span class="skills-label">Tools &amp; Technologies:</span> {{ tools_tech | join(', ') }}</div>
+  {% endif %}
+  {% if concepts %}
+  <div class="skills-line"><span class="skills-label">Concepts:</span> {{ concepts | join(', ') }}</div>
+  {% endif %}
+  {% if operating_systems %}
+  <div class="skills-line"><span class="skills-label">Operating Systems:</span> {{ operating_systems | join(', ') }}</div>
+  {% endif %}
+  {% if remaining_technical %}
+  <div class="skills-line">{{ remaining_technical | join(', ') }}</div>
+  {% endif %}
+  {% if languages_spoken %}
+  <div class="skills-line"><span class="skills-label">Languages:</span> {{ languages_spoken | join(', ') }}</div>
+  {% endif %}
+  {% if skills_soft %}
+  <div class="skills-line"><span class="skills-label">Soft skills:</span> {{ skills_soft | join(', ') }}</div>
+  {% endif %}
 </div>
 {% endif %}
 
