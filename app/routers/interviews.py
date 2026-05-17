@@ -683,22 +683,32 @@ def _select_from_bank(
         weak_set = {x.id for x in weak_pool}
         normal_pool = [x for x in unseen if x.id not in weak_set]
 
-    # ── Company priority within each pool ──
-    def _split_company(items):
+    # ── Company priority ──
+    # If a company is requested, prefer company-matching questions globally
+    # (across weak + normal pools) before non-company ones.
+    selected_company = (company or "").strip().casefold()
+
+    def _partition_company(items):
         comp, other = [], []
         for x in items:
-            if company and x.company and x.company.lower() == company.lower():
+            item_company = (x.company or "").strip().casefold()
+            if selected_company and item_company == selected_company:
                 comp.append(x)
             else:
                 other.append(x)
-        random.shuffle(comp); random.shuffle(other)
-        return comp + other
+        random.shuffle(comp)
+        random.shuffle(other)
+        return comp, other
 
-    weak_pool = _split_company(weak_pool)
-    normal_pool = _split_company(normal_pool)
+    weak_comp, weak_other = _partition_company(weak_pool)
+    normal_comp, normal_other = _partition_company(normal_pool)
 
-    # Take from weak first, then fill from normal.
-    candidate = weak_pool + normal_pool
+    if selected_company:
+        # Strong company preference: company matches first, then fallback.
+        candidate = weak_comp + normal_comp + weak_other + normal_other
+    else:
+        # No company requested: keep weak-first behavior.
+        candidate = weak_comp + weak_other + normal_comp + normal_other
 
     selected = []
     excl = exclude_ids or set()

@@ -2,15 +2,11 @@
 Community questions router — v2.
 
 Changes vs v1:
-  • Three-tier intake based on AI quality_score:
-        ≥ 70 → status='approved' immediately
-        40-69 → status='pending'  (community vote decides)
-        < 40  → status='rejected'
-  • Like/Dislike voting on pending questions.
-        - 5+ votes & 70%+ upvote ratio → auto-approved (Postgres trigger)
-        - 5+ votes & 30%-or-less ratio → auto-rejected (Postgres trigger)
-  • Browse endpoint now optionally returns pending questions so users can
-    moderate. Approved questions are still the default.
+  • Two-tier intake based on AI quality_score:
+        ≥ 55 → status='approved' immediately
+        < 55 → status='rejected'
+  • Like/Dislike voting on approved questions.
+  • Browse endpoint supports approved/rejected/all.
 """
 
 from uuid import UUID
@@ -36,7 +32,6 @@ router = APIRouter(prefix="/questions/community", tags=["community-questions"])
 class CommunityQuestionItem(BaseModel):
     question_text: str = Field(..., min_length=10, max_length=1000)
     question_type: str = "technical"  # technical | soft | behavioral | general
-    difficulty: int = Field(default=3, ge=1, le=5)
 
 
 class CommunitySubmitRequest(BaseModel):
@@ -70,7 +65,6 @@ class CommunityQuestionOut(BaseModel):
 class CommunityQuestionUpdate(BaseModel):
     question_text: str | None = None
     question_type: str | None = None
-    difficulty: int | None = Field(default=None, ge=1, le=5)
     company: str | None = None
 
 
@@ -83,12 +77,23 @@ class VoteRequest(BaseModel):
 # ─────────────────────────────────────────
 
 def _status_from_quality(quality_score: int) -> str:
-    """Three-tier intake based on the AI's quality verdict."""
-    if quality_score >= 70:
+    """Two-tier intake: approve high quality, reject everything else."""
+    if quality_score >= 55:
         return "approved"
-    if quality_score >= 40:
-        return "pending"
     return "rejected"
+
+
+def _difficulty_from_quality(quality_score: int) -> int:
+    """Map AI quality score (0..100) to 1..5 stars."""
+    if quality_score >= 90:
+        return 5
+    if quality_score >= 75:
+        return 4
+    if quality_score >= 60:
+        return 3
+    if quality_score >= 45:
+        return 2
+    return 1
 
 
 @router.post("", response_model=list[CommunityQuestionOut], status_code=201)
@@ -115,7 +120,7 @@ def submit_community_questions(
             question_text_en=result["text_en"],
             question_text_ar=result["text_ar"],
             question_type=item.question_type,
-            difficulty=item.difficulty,
+            difficulty=_difficulty_from_quality(quality_score),
             source="community",
             submitted_by=uid,
             status=status,
@@ -154,7 +159,7 @@ def list_my_community_questions(
 
 
 # ─────────────────────────────────────────
-#  UPDATE / DELETE (own, only if pending)
+#  UPDATE / DELETE (own, editable when not approved)
 # ─────────────────────────────────────────
 
 @router.patch("/{question_id}", response_model=CommunityQuestionOut)
@@ -166,10 +171,10 @@ def update_my_community_question(
 ):
     q = _get_own_question(question_id, user_id, db)
 
-    if q.status != "pending":
+    if q.status == "approved":
         raise HTTPException(
             status_code=400,
-            detail=f"Cannot edit a question that is already {q.status}.",
+            detail="Cannot edit an approved question.",
         )
 
     if body.question_text is not None:
@@ -183,14 +188,13 @@ def update_my_community_question(
         q.quality_score = int(result.get("quality_score", q.quality_score or 50))
         new_status = _status_from_quality(q.quality_score or 50)
         q.status = new_status
+        q.difficulty = _difficulty_from_quality(q.quality_score or 0)
         q.rejection_reason = (
             result.get("rejection_reason") if new_status == "rejected" else None
         )
 
     if body.question_type is not None:
         q.question_type = body.question_type
-    if body.difficulty is not None:
-        q.difficulty = body.difficulty
     if body.company is not None:
         q.company = body.company.strip() or None
 
@@ -208,7 +212,6 @@ def delete_my_community_question(
     """
     Withdraw one of your own submissions.
 
-    - pending  → hard-deleted (nothing references it yet, safe to drop).
     - approved → soft-deleted: status set to 'rejected' with a "withdrawn by
                  author" reason. This stops it appearing in future interviews
                  (selection only pulls 'approved' rows) without breaking the
@@ -225,7 +228,7 @@ def delete_my_community_question(
         db.query(SessionQuestion).filter(SessionQuestion.question_id == q.id).exists()
     ).scalar()
 
-    if q.status == "pending" and not referenced:
+    if q.status != "approved" and not referenced:
         db.delete(q)
         db.commit()
         return
@@ -259,25 +262,24 @@ def browse_community_questions(
     role_name: str | None = None,
     company: str | None = None,
     question_type: str | None = None,
-    status: str = Query("approved", description="approved | pending | all"),
+    status: str = Query("approved", description="approved | rejected | all"),
     user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
     """
-    Browse community questions. Defaults to approved. Pass status='pending' to
-    see questions awaiting community vote (so users can moderate).
+    Browse community questions. Defaults to approved.
     """
     uid = UUID(user_id)
     q = db.query(Question).filter(Question.source == "community")
 
     if status == "approved":
         q = q.filter(Question.status == "approved")
-    elif status == "pending":
-        q = q.filter(Question.status == "pending")
+    elif status == "rejected":
+        q = q.filter(Question.status == "rejected")
     elif status == "all":
-        q = q.filter(Question.status.in_(("approved", "pending")))
+        q = q.filter(Question.status.in_(("approved", "rejected")))
     else:
-        raise HTTPException(400, detail="status must be approved | pending | all")
+        raise HTTPException(400, detail="status must be approved | rejected | all")
 
     if role_name:
         q = q.filter(Question.role_name == role_name)
@@ -286,25 +288,13 @@ def browse_community_questions(
     if question_type:
         q = q.filter(Question.question_type == question_type)
 
-    # Pending questions ordered by least-voted first so they get exposure;
-    # approved by recency.
-    if status == "pending":
-        rows = (
-            q.order_by(
-                (Question.upvotes + Question.downvotes).asc(),
-                Question.created_at.desc(),
-            )
-            .limit(50)
-            .all()
-        )
-    else:
-        rows = q.order_by(Question.created_at.desc()).limit(50).all()
+    rows = q.order_by(Question.created_at.desc()).limit(50).all()
 
     return [_to_out(r, db, uid) for r in rows]
 
 
 # ─────────────────────────────────────────
-#  VOTE on a pending community question
+#  VOTE on an approved community question
 # ─────────────────────────────────────────
 
 @router.post("/{question_id}/vote", response_model=CommunityQuestionOut)
@@ -344,8 +334,8 @@ def vote_on_community_question(
     if q.submitted_by == uid:
         raise HTTPException(400, detail="You can't vote on your own submission")
 
-    # Approved/rejected questions are settled — no further voting needed.
-    if q.status not in ("pending", "approved"):
+    # Voting is only allowed on approved questions in the bank.
+    if q.status != "approved":
         raise HTTPException(400, detail=f"Question is {q.status}; voting closed")
 
     existing = (
@@ -409,6 +399,11 @@ def _get_own_question(question_id: str, user_id: str, db: Session) -> Question:
 
 
 def _to_out(q: Question, db: Session, viewer_uid: UUID | None = None) -> CommunityQuestionOut:
+    status = q.status
+    if status == "pending":
+        # Backward compatibility for legacy rows after removing pending.
+        status = "rejected"
+
     my_vote = None
     if viewer_uid is not None:
         v = (
@@ -431,7 +426,7 @@ def _to_out(q: Question, db: Session, viewer_uid: UUID | None = None) -> Communi
         difficulty=q.difficulty,
         company=q.company,
         original_language=q.original_language,
-        status=q.status,
+        status=status,
         rejection_reason=q.rejection_reason,
         quality_score=q.quality_score,
         upvotes=q.upvotes or 0,

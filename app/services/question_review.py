@@ -3,9 +3,8 @@ AI service for community question validation and translation — v2.
 
 NEW IN V2:
   Returns a `quality_score` (0..100) so the router can decide:
-    >= 70  → status='approved' (high quality, on-topic, well-formed)
-    40-69  → status='pending'  (let the community vote decide)
-    < 40   → status='rejected' (off-topic, gibberish, spam)
+    >= 55  → status='approved' (high quality, on-topic, well-formed)
+    < 55   → status='rejected' (off-topic, gibberish, spam, or weak quality)
 
 The previous version only filtered for safety (offensive / not-a-question /
 illegal), which let through every "off-track" question that was technically
@@ -32,7 +31,7 @@ def validate_and_translate(
 
     Returns:
         {
-            "approved":         True | False,        # convenience: quality_score >= 40
+            "approved":         True | False,        # convenience: quality_score >= 55
             "quality_score":    0..100,              # used by router for tier decision
             "rejection_reason": "..." | None,
             "text_en":          "...",
@@ -124,7 +123,7 @@ Return ONLY JSON (no markdown):
             quality_score = 50
         quality_score = max(0, min(100, quality_score))
 
-        approved = quality_score >= 40  # backward-compat boolean
+        approved = quality_score >= 55
         rejection_reason = data.get("rejection_reason") if not approved else None
 
         translated = (data.get("translated_text") or "").strip()
@@ -147,11 +146,11 @@ Return ONLY JSON (no markdown):
             }
 
     except Exception:
-        # If AI fails, neither approve nor reject — let community decide.
+        # If AI fails, fail safe as rejected to avoid accidental low-quality acceptance.
         return {
-            "approved": True,
-            "quality_score": 50,
-            "rejection_reason": None,
+            "approved": False,
+            "quality_score": 0,
+            "rejection_reason": "AI review failed",
             "text_en": question_text.strip(),
             "text_ar": question_text.strip(),
         }
