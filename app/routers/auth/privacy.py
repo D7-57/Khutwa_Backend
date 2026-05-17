@@ -21,12 +21,12 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.core.security import get_current_user_id
 from app.db.session import get_db
 from app.models.profile import Profile, CURRENT_TERMS_VERSION, _privacy_default
+from app.services.account import delete_user_data
 from app.schemas.auth.privacy import (
     PrivacySettingsOut,
     PrivacySettingsUpdate,
     AcceptTermsRequest,
     AcceptTermsResponse,
-    DataDeletionRequest,
     PRIVACY_TOGGLE_KEYS,
 )
 
@@ -308,7 +308,7 @@ def accept_terms(
 
 @router.delete("/data", status_code=200)
 def delete_my_data(
-    body: DataDeletionRequest,
+    body: dict,
     user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
@@ -328,26 +328,31 @@ def delete_my_data(
       - "all":                      wipe everything + delete the profile row
                                     (Supabase auth row handled separately)
     """
-    if not body.confirm:
+    confirm = bool(body.get("confirm"))
+    if not confirm:
         raise HTTPException(
             status_code=400,
             detail="You must set confirm=true to proceed with deletion.",
         )
+    # Keep compatibility with old clients that send `scope`.
+    # Current app flow uses a full wipe while keeping the account.
+    scope = (body.get("scope") or "all").strip().lower()
+    if scope not in {"all", "cv", "interviews", "roadmap_personalization"}:
+        raise HTTPException(status_code=400, detail="Invalid scope")
+    if scope != "all":
+        raise HTTPException(
+            status_code=501,
+            detail={
+                "code": "NOT_IMPLEMENTED",
+                "scope": scope,
+                "message": "Partial-scope deletion is not implemented yet.",
+            },
+        )
 
-    profile = db.get(Profile, UUID(user_id))
-    if not profile:
-        raise HTTPException(status_code=404, detail="Profile not found")
-
-    # TODO(privacy-erasure): implement per-scope wipes alongside each feature.
-    raise HTTPException(
-        status_code=501,
-        detail={
-            "code": "NOT_IMPLEMENTED",
-            "scope": body.scope,
-            "message": (
-                "Data deletion endpoint is reserved for the "
-                "right-to-erasure flow. Implementation is wired up "
-                "feature-by-feature — contact support for now."
-            ),
-        },
-    )
+    result = delete_user_data(db, user_id)
+    return {
+        "ok": True,
+        "message": "All personal data has been deleted. Account remains active.",
+        "deleted_counts": result.get("counts", {}),
+        "storage_warning": result.get("storage_warning"),
+    }

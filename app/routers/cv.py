@@ -21,10 +21,37 @@ from app.core.security import get_current_user_id
 from app.db.session import get_db
 from app.models.cv import CVDocument, CVEvaluation
 from app.models.career.role import Role
+from app.models.profile import Profile, _privacy_default
 from app.schemas.cv import CVEvaluateRequest, CVEvaluateResponse, JobMatchRequest, JobMatchResponse
 from app.services.cv_evaluation import run_full_cv_evaluation, build_role_profile, score_ats, build_radar_scores
 
 router = APIRouter(prefix="/cv", tags=["cv"])
+
+
+def _require_cv_storage_enabled(db: Session, user_id: str):
+    """
+    CV persistence guard (PDPL optional consent).
+
+    When cv_storage is OFF we block endpoints that persist or read stored CV
+    artifacts. This prevents hidden backfilling when the user toggles consent
+    back on later.
+    """
+    profile = db.get(Profile, uuid.UUID(user_id))
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    settings = profile.privacy_settings or _privacy_default()
+    if not settings.get("cv_storage", False):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "PRIVACY_CONSENT_REQUIRED",
+                "key": "cv_storage",
+                "message": (
+                    "CV storage is turned off. Enable it in Settings -> Privacy "
+                    "to upload, save, and retrieve CV documents."
+                ),
+            },
+        )
 
 
 
@@ -99,6 +126,7 @@ def get_cv_download_url(
     user_id: str = Depends(get_current_user_id),
     creds=Depends(bearer_scheme),
 ):
+    _require_cv_storage_enabled(db, user_id)
     if creds is None or creds.scheme.lower() != "bearer":
         raise HTTPException(status_code=401, detail="Missing bearer token")
 
@@ -193,6 +221,7 @@ def list_cv_evaluations(
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
+    _require_cv_storage_enabled(db, user_id)
     try:
         cv_uuid = uuid.UUID(cv_id)
     except ValueError:
@@ -232,6 +261,7 @@ def get_cv_evaluation(
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
+    _require_cv_storage_enabled(db, user_id)
     try:
         evaluation_uuid = uuid.UUID(evaluation_id)
     except ValueError:
@@ -268,6 +298,7 @@ def list_my_cv_documents(
     db: Session = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
+    _require_cv_storage_enabled(db, user_id)
     docs = (
         db.query(CVDocument)
         .filter(CVDocument.user_id == uuid.UUID(user_id))

@@ -459,10 +459,13 @@ def generate_roadmap(
     # If the user has profile level signals (experience/certs/work history),
     # prefer AI so roadmap depth matches their level instead of static template.
     has_level_signals = bool(
-        profile.years_of_experience
-        or profile.current_status
-        or (profile.certifications and len(profile.certifications) > 0)
-        or (profile.experiences and len(profile.experiences) > 0)
+        personalize
+        and (
+            profile.years_of_experience
+            or profile.current_status
+            or (profile.certifications and len(profile.certifications) > 0)
+            or (profile.experiences and len(profile.experiences) > 0)
+        )
     )
     prefer_ai_personalized = has_level_signals
 
@@ -482,6 +485,7 @@ def generate_roadmap(
             include_tangible_outcome=include_tangible_outcome,
             previously_covered_skills=previously_covered,
             previously_covered_task_titles=previously_covered_titles,
+            include_profile_context=personalize,
         )
         source = "ai"
         is_ai = True
@@ -504,6 +508,7 @@ def generate_roadmap(
             include_tangible_outcome=include_tangible_outcome,
             previously_covered_skills=previously_covered,
             previously_covered_task_titles=previously_covered_titles,
+            include_profile_context=personalize,
         )
         source = "ai"
         is_ai = True
@@ -868,9 +873,14 @@ def _generate_with_ai(
     include_tangible_outcome: bool = False,
     previously_covered_skills: list[str] | None = None,
     previously_covered_task_titles: list[str] | None = None,
+    include_profile_context: bool = True,
 ) -> dict:
-    profile_context = _build_profile_context(profile, role.name, gap_names)
-    user_cert_names = _extract_certification_names(profile)
+    profile_context = (
+        _build_profile_context(profile, role.name, gap_names)
+        if include_profile_context
+        else {"role_name": role.name}
+    )
+    user_cert_names = _extract_certification_names(profile) if include_profile_context else []
     recommended_certs = list(profile_context.get("recommended_standard_certs") or [])
 
     user_prompt = build_roadmap_prompt(
@@ -945,7 +955,14 @@ def _extract_certification_names(profile: Profile) -> list[str]:
         if isinstance(item, str):
             name = item.strip()
         elif isinstance(item, dict):
-            name = str(item.get("name") or "").strip()
+            name = str(
+                item.get("name")
+                or item.get("title")
+                or item.get("certification")
+                or item.get("cert_name")
+                or item.get("certificate_name")
+                or ""
+            ).strip()
         if name:
             names.append(name)
 

@@ -173,6 +173,8 @@ def start_interview(
     )
     language = requested_language or _get_language(db, uid)
     profile = db.get(Profile, uid)
+    privacy_settings = (profile.privacy_settings or {}) if profile else {}
+    store_answer_text = bool(privacy_settings.get("interview_personalization", False))
     user_name = profile.first_name if profile and profile.first_name else None
 
     practice_mode = (body.practice_mode or "free").lower()
@@ -270,6 +272,8 @@ def start_interview(
             "mode": body.mode,
             "profile_context": profile_context,
             "practice_mode": practice_mode,
+            # PDPL: OFF means we keep score signal but avoid raw answer storage.
+            "store_answer_text": store_answer_text,
         },
     )
     db.add(session)
@@ -1410,7 +1414,7 @@ def rapid_submit(
             "correct_answer": result.get("correct_answer", ""),
         }
 
-        sq.user_answer = answer
+        sq.user_answer = _answer_to_store(s, answer)
         sq.score = int(evaluation["score"])
         sq.ai_feedback = evaluation.get("final_feedback", "")
         sq.evaluation_json = {"attempts": [{"answer": answer, "evaluation": evaluation, "action": "next"}]}
@@ -1465,6 +1469,15 @@ def _get_followup_max(s: InterviewSession) -> int:
     if isinstance(s.intro_evaluation_json, dict):
         return int(s.intro_evaluation_json.get("followup_max", 1))
     return 1
+
+
+def _store_answer_text_enabled(s: InterviewSession) -> bool:
+    cfg = s.intro_evaluation_json or {}
+    return bool(cfg.get("store_answer_text", True))
+
+
+def _answer_to_store(s: InterviewSession, answer: str) -> str:
+    return answer if _store_answer_text_enabled(s) else ""
 
 
 def _get_cv_summary(db: Session, user_id: UUID) -> str | None:
@@ -1662,7 +1675,7 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
                      "action": "next", "curiosity": True, "explanation": curiosity_response}
                 ],
             }
-            sq.user_answer = sq.user_answer or answer
+            sq.user_answer = sq.user_answer or _answer_to_store(s, answer)
             sq.score = CURIOSITY_BASE + CURIOSITY_BONUS
             sq.ai_feedback = curiosity_eval["final_feedback"]
             s.followup_count = 0
@@ -1817,7 +1830,7 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
 
         if reask_count >= MAX_REASK:
             s.followup_count = 0
-            sq.user_answer = sq.user_answer or answer
+            sq.user_answer = sq.user_answer or _answer_to_store(s, answer)
             sq.score = 0
             sq.ai_feedback = evaluation.get("final_feedback", "")
             db.flush()
@@ -1851,7 +1864,7 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
 
     if answer_type in ("admitted_ignorance", "partial"):
         s.followup_count = 0
-        sq.user_answer = sq.user_answer or answer
+        sq.user_answer = sq.user_answer or _answer_to_store(s, answer)
         sq.score = int(evaluation.get("score", 25))
         sq.ai_feedback = evaluation.get("final_feedback", "")
         correct = evaluation.get("correct_answer", "")
@@ -1890,7 +1903,7 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
 
     s.followup_count = 0
     if sq.user_answer is None:
-        sq.user_answer = answer
+        sq.user_answer = _answer_to_store(s, answer)
     new_score = int(evaluation.get("score", 0))
     if sq.score is not None and is_followup_answer:
         sq.score = max(sq.score, (sq.score + new_score) // 2)

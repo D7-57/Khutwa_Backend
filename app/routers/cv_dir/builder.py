@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.core.security import get_current_user_id
 from app.db.session import get_db
 from app.models.cv import CVDocument
+from app.models.profile import Profile, _privacy_default
 from app.schemas.cv_dir.builder import (
     CVCreateRequest,
     CVCreateResponse,
@@ -19,6 +20,25 @@ from app.services.cv.ai_enhance import enhance_section
 from app.services.cv.renderer import render_cv_html, render_cv_pdf, list_templates
 
 router = APIRouter(prefix="/cv/builder", tags=["cv-builder"])
+
+
+def _require_cv_storage_enabled(db: Session, user_id: str):
+    profile = db.get(Profile, uuid.UUID(user_id))
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    settings = profile.privacy_settings or _privacy_default()
+    if not settings.get("cv_storage", False):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "PRIVACY_CONSENT_REQUIRED",
+                "key": "cv_storage",
+                "message": (
+                    "CV storage is turned off. Enable it in Settings -> Privacy "
+                    "to save CV documents."
+                ),
+            },
+        )
 
 
 # ══════════════════════════════════════════════════════════════
@@ -91,6 +111,7 @@ def create_cv_from_scratch(
     user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
+    _require_cv_storage_enabled(db, user_id)
     uid = uuid.UUID(user_id)
 
     doc = CVDocument(
@@ -132,6 +153,7 @@ def get_cv_for_editor(
     user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
+    _require_cv_storage_enabled(db, user_id)
     doc = _get_user_cv(cv_id, user_id, db)
     source = "builder" if (doc.raw_file_url or "").startswith("builder://") else "upload"
     return CVBuilderDocumentResponse(
@@ -154,6 +176,7 @@ def save_cv_editor_state(
     user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
+    _require_cv_storage_enabled(db, user_id)
     doc = _get_user_cv(cv_id, user_id, db)
 
     if body.title is not None:
@@ -187,6 +210,7 @@ def preview_cv_html(
     user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
+    _require_cv_storage_enabled(db, user_id)
     doc = _get_user_cv(cv_id, user_id, db)
     try:
         html = render_cv_html(
@@ -209,6 +233,7 @@ def export_cv_pdf(
     user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
+    _require_cv_storage_enabled(db, user_id)
     doc = _get_user_cv(cv_id, user_id, db)
     try:
         pdf_bytes = render_cv_pdf(
