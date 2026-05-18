@@ -24,7 +24,6 @@ from app.models.career.role import Role
 from app.models.profile import Profile, _privacy_default
 from app.schemas.cv import CVEvaluateRequest, CVEvaluateResponse, JobMatchRequest, JobMatchResponse
 from app.services.cv_evaluation import run_full_cv_evaluation, build_role_profile, score_ats, build_radar_scores
-from app.services.achievements import check_and_award
 
 router = APIRouter(prefix="/cv", tags=["cv"])
 
@@ -106,8 +105,6 @@ async def upload_cv(
     )
 
     db.add(doc)
-    db.flush()  # so doc.id and the FK are visible to the award query
-    new_achievements = check_and_award(uuid.UUID(user_id), db, trigger="cv_upload")
     db.commit()
     db.refresh(doc)
 
@@ -119,7 +116,6 @@ async def upload_cv(
             "name": (doc.extracted_data or {}).get("contact_info", {}).get("name"),
             "skills": (doc.extracted_data or {}).get("skills", {}),
         },
-        "new_achievements": new_achievements,
     }
 
 # That’s it: Flutter calls this endpoint, gets a URL, opens it in webview/pdf viewer.
@@ -206,10 +202,6 @@ def evaluate_cv(
     )
 
     db.add(evaluation)
-    db.flush()
-    new_achievements = check_and_award(
-        uuid.UUID(user_id), db, trigger="cv_evaluate"
-    )
     db.commit()
     db.refresh(evaluation)
 
@@ -221,7 +213,6 @@ def evaluate_cv(
         overall_score=evaluation.overall_score,
         ats_score=evaluation.ats_score,
         evaluation_json=evaluation.evaluation_json or {},
-        new_achievements=new_achievements,
     )
 
 @router.get("/{cv_id}/evaluations", response_model=list[CVEvaluationItemResponse])

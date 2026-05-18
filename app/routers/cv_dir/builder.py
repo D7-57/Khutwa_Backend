@@ -111,7 +111,6 @@ def create_cv_from_scratch(
     user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
-    _require_cv_storage_enabled(db, user_id)
     uid = uuid.UUID(user_id)
 
     doc = CVDocument(
@@ -153,7 +152,6 @@ def get_cv_for_editor(
     user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
-    _require_cv_storage_enabled(db, user_id)
     doc = _get_user_cv(cv_id, user_id, db)
     source = "builder" if (doc.raw_file_url or "").startswith("builder://") else "upload"
     return CVBuilderDocumentResponse(
@@ -176,7 +174,6 @@ def save_cv_editor_state(
     user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
-    _require_cv_storage_enabled(db, user_id)
     doc = _get_user_cv(cv_id, user_id, db)
 
     if body.title is not None:
@@ -210,7 +207,6 @@ def preview_cv_html(
     user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
-    _require_cv_storage_enabled(db, user_id)
     doc = _get_user_cv(cv_id, user_id, db)
     try:
         html = render_cv_html(
@@ -233,7 +229,6 @@ def export_cv_pdf(
     user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
-    _require_cv_storage_enabled(db, user_id)
     doc = _get_user_cv(cv_id, user_id, db)
     try:
         pdf_bytes = render_cv_pdf(

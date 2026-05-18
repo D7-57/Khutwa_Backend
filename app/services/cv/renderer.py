@@ -28,6 +28,54 @@ _env = Environment(
 )
 
 
+def _clean_text(value) -> str:
+    text = str(value or "").strip()
+    if text.startswith("{") and text.endswith("}"):
+        text = text[1:-1].strip()
+    if text.endswith(";"):
+        text = text[:-1].strip()
+    return text
+
+
+def _normalize_certifications(raw) -> list[str]:
+    certs = raw if isinstance(raw, list) else []
+    normalized: list[str] = []
+    for cert in certs:
+        if isinstance(cert, dict):
+            name = _clean_text(cert.get("name") or cert.get("title") or cert.get("certification") or "")
+            issuer = _clean_text(cert.get("issuer") or "")
+            issued = _clean_text(cert.get("issued_date") or cert.get("date") or "")
+            cred_id = _clean_text(cert.get("credential_id") or cert.get("id") or "")
+            parts = [p for p in [name, issuer, issued] if p]
+            text = " - ".join(parts)
+            if cred_id:
+                text = f"{text} - ID: {cred_id}" if text else f"ID: {cred_id}"
+            if text:
+                normalized.append(text)
+            continue
+        text = _clean_text(cert)
+        if text:
+            normalized.append(text)
+    return normalized
+
+
+def _normalize_languages(raw) -> list[str]:
+    langs = raw if isinstance(raw, list) else []
+    normalized: list[str] = []
+    for lang in langs:
+        if isinstance(lang, dict):
+            name = _clean_text(lang.get("name") or lang.get("language") or "")
+            level = _clean_text(lang.get("level") or "")
+            text = f"{name} ({level})" if name and level else (name or level)
+            if text:
+                normalized.append(text)
+            continue
+        text = _clean_text(lang)
+        if text:
+            normalized.append(text)
+    return normalized
+
+
 def _prepare_template_context(cv_data: dict, language: str = "en") -> dict:
     """
     Flatten the cv_data JSON into template-friendly variables.
@@ -38,6 +86,8 @@ def _prepare_template_context(cv_data: dict, language: str = "en") -> dict:
     experience = cv_data.get("experience") or []
     education = cv_data.get("education") or []
     projects = cv_data.get("projects") or []
+    certifications = _normalize_certifications(cv_data.get("certifications"))
+    languages_spoken = _normalize_languages(cv_data.get("languages"))
 
     # normalize skills — could be dict with subcategories or flat list
     if isinstance(skills, dict):
@@ -128,8 +178,8 @@ def _prepare_template_context(cv_data: dict, language: str = "en") -> dict:
         "experience": experience,
         "education": education,
         "projects": projects,
-        "certifications": cv_data.get("certifications") or [],
-        "languages_spoken": cv_data.get("languages") or [],
+        "certifications": certifications,
+        "languages_spoken": languages_spoken,
         # skills breakdown
         "skills_technical": skills_technical,
         "skills_tools": skills_tools,

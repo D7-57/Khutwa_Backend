@@ -22,7 +22,7 @@ body {
 }
 
 .header {
-  text-align: center;
+  text-align: left;
   margin-bottom: 4pt;
 }
 
@@ -45,10 +45,16 @@ body {
   font-size: 11pt;
   font-weight: bold;
   text-transform: uppercase;
-  text-align: center;
+  text-align: left;
   border-bottom: 1.5pt solid #000;
   padding-bottom: 1pt;
   margin-bottom: 4pt;
+}
+
+.section,
+.entry,
+ul.bullets {
+  page-break-inside: avoid;
 }
 
 .entry {
@@ -163,7 +169,11 @@ ul.bullets li {
       <span class="entry-location"></span>
     </div>
     <div class="entry-subtitle">
-      <span>{% if edu.degree %}{{ edu.degree }}{% endif %}{% if edu.major %}, <i>{{ edu.major }}</i>{% endif %}</span>
+      <span>
+        {% if edu.degree %}{{ edu.degree }}{% endif %}
+        {% if edu.major %}, <i>{{ edu.major }}</i>{% endif %}
+        {% if edu.gpa is defined and edu.gpa %} | GPA: {{ edu.gpa }}{% endif %}
+      </span>
       <span>{{ edu.start_date }}{% if edu.end_date %} - {{ edu.end_date }}{% endif %}</span>
     </div>
   </div>

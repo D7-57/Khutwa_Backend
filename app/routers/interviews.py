@@ -72,7 +72,6 @@ from app.services.tts import synthesize_question_audio
 from app.services.interview_summary import build_interview_summary
 from app.services.interview.body_tracker import get_tracker, create_tracker, remove_tracker
 from app.services.interview.tone_analyzer import analyze_tone
-from app.services.achievements import check_and_award
 
 router = APIRouter(prefix="/interviews", tags=["interviews"])
 
@@ -793,24 +792,12 @@ async def turn(
 
     if s.phase in ("outro", "finished"):
         if mode == "video": remove_tracker(session_id)
-        was_already_finished = (s.phase == "finished" and s.finished_at is not None)
         s.phase = "finished"
         if not s.finished_at:
             s.finished_at = datetime.now(timezone.utc)
-        # Only fire on the first transition into finished — not every re-call
-        # to this endpoint after the session ended.
-        new_achievements = []
-        if not was_already_finished:
-            new_achievements = check_and_award(
-                s.user_id, db, trigger="interview_complete", session_id=str(s.id),
-            )
         db.commit()
-        return {
-            "phase": "finished", "prompt_type": "outro",
-            "prompt_text": OUTRO_TEXT.get(language, OUTRO_TEXT["en"]),
-            "transcript": transcript,
-            "new_achievements": new_achievements,
-        }
+        return {"phase": "finished", "prompt_type": "outro",
+                "prompt_text": OUTRO_TEXT.get(language, OUTRO_TEXT["en"]), "transcript": transcript}
 
     response = _handle_bank(s, answer, transcript, language, followup_max, db,
                         tone_desc=tone_desc, tone_data=tone_data,
@@ -954,7 +941,7 @@ def get_interview_analytics(user_id: str = Depends(get_current_user_id), db: Ses
         })
 
     all_sqs = (
-        db.query(SessionQuestion)
+            db.query(SessionQuestion)
         .join(InterviewSession, InterviewSession.id == SessionQuestion.session_id)
         .filter(
             InterviewSession.user_id == uid,
@@ -1102,9 +1089,6 @@ def resume_interview(
         if not s.finished_at:
             s.finished_at = datetime.now(timezone.utc)
         _update_total_score(s, db)
-        new_achievements = check_and_award(
-            s.user_id, db, trigger="interview_complete", session_id=str(s.id),
-        )
         db.commit()
         return {
             "session_id": str(s.id),
@@ -1114,7 +1098,6 @@ def resume_interview(
             "total_questions": total,
             "answered": answered,
             "prompt_text": OUTRO_TEXT.get(language, OUTRO_TEXT["en"]),
-            "new_achievements": new_achievements,
         }
 
     if mode == "video":
@@ -1161,16 +1144,16 @@ def finalize_interview(
         remove_tracker(str(s.id))
 
     if s.phase == "finished":
-        # Already finished — return current snapshot. No re-award.
-        return _finalize_response(s, db, new_achievements=[])
+        # Already finished — return current snapshot.
+        return _finalize_response(s, db)
 
     # Mark unanswered SQs as skipped.
     sqs = (
-        db.query(SessionQuestion)
-        .filter(
-            SessionQuestion.session_id == s.id,
-            SessionQuestion.user_answer.is_(None),
-        )
+            db.query(SessionQuestion)
+            .filter(
+                SessionQuestion.session_id == s.id,
+                SessionQuestion.user_answer.is_(None),
+            )
         .all()
     )
     for sq in sqs:
@@ -1196,15 +1179,12 @@ def finalize_interview(
     s.followup_count = 0
     db.flush()
     _update_total_score(s, db)
-    new_achievements = check_and_award(
-        s.user_id, db, trigger="interview_complete", session_id=str(s.id),
-    )
     db.commit()
     db.refresh(s)
-    return _finalize_response(s, db, new_achievements=new_achievements)
+    return _finalize_response(s, db)
 
 
-def _finalize_response(s: InterviewSession, db: Session, new_achievements: list | None = None) -> dict:
+def _finalize_response(s: InterviewSession, db: Session) -> dict:
     answered = db.query(SessionQuestion).filter(
         SessionQuestion.session_id == s.id,
         SessionQuestion.user_answer.isnot(None),
@@ -1220,7 +1200,6 @@ def _finalize_response(s: InterviewSession, db: Session, new_achievements: list 
         "finished_at": s.finished_at.isoformat() if s.finished_at else None,
         "num_answered": answered,
         "num_questions": total,
-        "new_achievements": new_achievements or [],
     }
 
 
@@ -1401,7 +1380,7 @@ def rapid_submit(
     sqs = (
         db.query(SessionQuestion)
         .filter(SessionQuestion.session_id == s.id)
-        .order_by(SessionQuestion.id)
+            .order_by(SessionQuestion.id)
         .all()
     )
 
@@ -1463,16 +1442,12 @@ def rapid_submit(
     s.total_score = int(sum(scores) / len(scores)) if scores else 0
     s.phase = "finished"
     s.finished_at = datetime.now(timezone.utc)
-    new_achievements = check_and_award(
-        s.user_id, db, trigger="interview_complete", session_id=str(s.id),
-    )
     db.commit()
 
     return {
         "session_id": str(s.id),
         "total_score": s.total_score,
         "results": results,
-        "new_achievements": new_achievements,
     }
 
 
@@ -1798,10 +1773,10 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
         prior_followups = sum(
             1
             for prior_sq in (
-                db.query(SessionQuestion)
+        db.query(SessionQuestion)
                 .filter(SessionQuestion.session_id == s.id, SessionQuestion.id != sq.id)
-                .all()
-            )
+        .all()
+    )
             for att in (prior_sq.evaluation_json or {}).get("attempts", [])
             if att.get("action") == "follow_up"
         )
@@ -1813,11 +1788,11 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
             prev_sq = (
                 db.query(SessionQuestion)
                 .filter(SessionQuestion.session_id == s.id)
-                .order_by(SessionQuestion.id)
+        .order_by(SessionQuestion.id)
                 .offset(prev_idx)
                 .limit(1)
-                .first()
-            )
+        .first()
+    )
             if prev_sq:
                 prev_attempts = (prev_sq.evaluation_json or {}).get("attempts", [])
                 if any(att.get("action") == "follow_up" for att in prev_attempts):
