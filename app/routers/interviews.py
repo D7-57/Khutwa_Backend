@@ -57,6 +57,7 @@ from app.models.profile import Profile
 from app.models.cv import CVDocument
 from app.models.interview import InterviewSession, SessionQuestion
 from app.models.question_vote import QuestionRelevanceFeedback
+from app.services.achievements import check_and_award
 from app.services.ai_interview import (
     evaluate_intro,
     evaluate_and_decide,
@@ -1184,6 +1185,27 @@ def finalize_interview(
     return _finalize_response(s, db)
 
 
+def _award_interview_complete(s: InterviewSession, db: Session) -> list[dict]:
+    """
+    Re-evaluate every achievement bound to the 'interview_complete' trigger
+    (interview_first, _5, _10, _50, _score_90, _perfect_100, weekly_streak,
+    rapid_fire, night_owl, meta keys) and return the newly-awarded ones so
+    the caller can fold them into the response as `new_achievements`.
+
+    Best-effort: any exception is swallowed so a hiccup in the achievement
+    pipeline NEVER blocks the underlying interview transition.
+    """
+    try:
+        return check_and_award(
+            s.user_id,
+            db,
+            trigger="interview_complete",
+            session_id=str(s.id),
+        )
+    except Exception:
+        return []
+
+
 def _finalize_response(s: InterviewSession, db: Session) -> dict:
     answered = db.query(SessionQuestion).filter(
         SessionQuestion.session_id == s.id,
@@ -1192,6 +1214,14 @@ def _finalize_response(s: InterviewSession, db: Session) -> dict:
     total = db.query(SessionQuestion).filter(
         SessionQuestion.session_id == s.id,
     ).count()
+    new_achievements = _award_interview_complete(s, db)
+    # Award rows are inserted but the outer caller hasn't committed yet for
+    # some paths (e.g. retake) — commit here so the achievement row sticks
+    # alongside the finalized session.
+    try:
+        db.commit()
+    except Exception:
+        pass
     return {
         "session_id": str(s.id),
         "phase": s.phase,
@@ -1200,6 +1230,7 @@ def _finalize_response(s: InterviewSession, db: Session) -> dict:
         "finished_at": s.finished_at.isoformat() if s.finished_at else None,
         "num_answered": answered,
         "num_questions": total,
+        "new_achievements": new_achievements,
     }
 
 
@@ -1442,12 +1473,14 @@ def rapid_submit(
     s.total_score = int(sum(scores) / len(scores)) if scores else 0
     s.phase = "finished"
     s.finished_at = datetime.now(timezone.utc)
+    new_ach = _award_interview_complete(s, db)
     db.commit()
 
     return {
         "session_id": str(s.id),
         "total_score": s.total_score,
         "results": results,
+        "new_achievements": new_ach,
     }
 
 
@@ -1579,10 +1612,12 @@ def _handle_intro(s, answer, transcript, language, db, tone_desc="", tone_data=N
     if not sq:
         s.phase = "outro"
         s.finished_at = datetime.now(timezone.utc)
+        new_ach = _award_interview_complete(s, db)
         db.commit()
         return {"phase": "outro", "prompt_type": "outro",
                 "prompt_text": OUTRO_TEXT.get(language, OUTRO_TEXT["en"]),
-                "transcript": transcript, "intro_evaluation": intro_eval}
+                "transcript": transcript, "intro_evaluation": intro_eval,
+                "new_achievements": new_ach}
 
     q_text = _get_sq_question_text(sq, db, language)
     db.commit()
@@ -1601,10 +1636,12 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
     if not sq:
         s.phase = "outro"
         s.finished_at = datetime.now(timezone.utc)
+        new_ach = _award_interview_complete(s, db)
         db.commit()
         return {"phase": "outro", "prompt_type": "outro",
                 "prompt_text": OUTRO_TEXT.get(language, OUTRO_TEXT["en"]),
-                "transcript": transcript, "total_score": s.total_score}
+                "transcript": transcript, "total_score": s.total_score,
+                "new_achievements": new_ach}
 
     q_text = _get_sq_question_text(sq, db, language)
     q_type = sq.question_type or "technical"
@@ -1696,11 +1733,13 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
             if not next_sq:
                 s.phase = "outro"
                 s.finished_at = datetime.now(timezone.utc)
+                new_ach = _award_interview_complete(s, db)
                 db.commit()
                 return {"phase": "outro", "action": "end", "prompt_type": "outro",
                         "prompt_text": OUTRO_TEXT.get(language, OUTRO_TEXT["en"]),
                         "evaluation": curiosity_eval, "explanation": curiosity_response,
-                        "transcript": transcript, "total_score": s.total_score}
+                        "transcript": transcript, "total_score": s.total_score,
+                        "new_achievements": new_ach}
             nq_text = _get_sq_question_text(next_sq, db, language)
             db.commit()
             return {"phase": "bank", "action": "next", "prompt_type": "bank_question",
@@ -1849,11 +1888,13 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
             if not next_sq:
                 s.phase = "outro"
                 s.finished_at = datetime.now(timezone.utc)
+                new_ach = _award_interview_complete(s, db)
                 db.commit()
                 return {"phase": "outro", "action": "end", "prompt_type": "outro",
                         "prompt_text": OUTRO_TEXT.get(language, OUTRO_TEXT["en"]),
                         "evaluation": evaluation, "transcript": transcript,
-                        "total_score": s.total_score}
+                        "total_score": s.total_score,
+                        "new_achievements": new_ach}
             nq_text = _get_sq_question_text(next_sq, db, language)
             db.commit()
             return {"phase": "bank", "action": "next", "prompt_type": "bank_question",
@@ -1884,11 +1925,13 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
         if not next_sq:
             s.phase = "outro"
             s.finished_at = datetime.now(timezone.utc)
+            new_ach = _award_interview_complete(s, db)
             db.commit()
             return {"phase": "outro", "action": "end", "prompt_type": "outro",
                     "prompt_text": OUTRO_TEXT.get(language, OUTRO_TEXT["en"]),
                     "evaluation": evaluation, "correct_answer": correct,
-                    "transcript": transcript, "total_score": s.total_score}
+                    "transcript": transcript, "total_score": s.total_score,
+                    "new_achievements": new_ach}
         nq_text = _get_sq_question_text(next_sq, db, language)
         db.commit()
         return {"phase": "bank", "action": "next", "prompt_type": "bank_question",
@@ -1927,11 +1970,13 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
     if not next_sq:
         s.phase = "outro"
         s.finished_at = datetime.now(timezone.utc)
+        new_ach = _award_interview_complete(s, db)
         db.commit()
         return {"phase": "outro", "action": "end", "prompt_type": "outro",
                 "prompt_text": OUTRO_TEXT.get(language, OUTRO_TEXT["en"]),
                 "evaluation": evaluation, "transcript": transcript,
-                "total_score": s.total_score}
+                "total_score": s.total_score,
+                "new_achievements": new_ach}
 
     nq_text = _get_sq_question_text(next_sq, db, language)
     db.commit()
