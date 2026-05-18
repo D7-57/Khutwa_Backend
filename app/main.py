@@ -25,6 +25,9 @@ from app.routers.career.skills import router as career_skills_router
 from app.routers.career.role_survey import router as role_survey_router  # NEW
 from app.routers.roadmap.roadmap import router as roadmap_router
 
+# ── achievements ──
+from app.routers.achievements import router as achievements_router
+
 
 app = FastAPI(title="Khutwa API")
 
@@ -62,6 +65,9 @@ app.include_router(community_questions_router)
 app.include_router(cv_router)
 app.include_router(cv_quiz_router)
 app.include_router(cv_builder_router)
+
+# achievements (catalog + me + unseen + mark-seen + trigger)
+app.include_router(achievements_router)
 
 # legacy compatibility aliases for old role endpoints
 register_role_compat_aliases(app)

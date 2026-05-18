@@ -15,6 +15,9 @@ class CVEvaluateResponse(BaseModel):
     overall_score: int | None
     ats_score: int | None
     evaluation_json: dict
+    # Optional achievement awards piggy-backed on the response. Always present
+    # in successful responses; empty list when nothing new was earned.
+    new_achievements: list[dict] = []
 
 
 class CVEvaluationItemResponse(BaseModel):

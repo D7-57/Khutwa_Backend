@@ -21,6 +21,7 @@ from app.models.question import Question
 from app.models.question_vote import QuestionVote
 from app.models.interview import SessionQuestion
 from app.services.question_review import validate_and_translate
+from app.services.achievements import check_and_award
 
 router = APIRouter(prefix="/questions/community", tags=["community-questions"])
 
@@ -72,6 +73,16 @@ class VoteRequest(BaseModel):
     vote: int = Field(..., description="+1 like, -1 dislike, 0 to clear vote")
 
 
+class CommunitySubmitResponse(BaseModel):
+    """
+    Wrapper response so we can fold `new_achievements` alongside the list
+    of created questions. The earlier shape (bare list) wouldn't let us
+    piggyback achievement awards on the submit response.
+    """
+    questions: list[CommunityQuestionOut]
+    new_achievements: list[dict] = []
+
+
 # ─────────────────────────────────────────
 #  SUBMIT
 # ─────────────────────────────────────────
@@ -96,7 +107,7 @@ def _difficulty_from_quality(quality_score: int) -> int:
     return 1
 
 
-@router.post("", response_model=list[CommunityQuestionOut], status_code=201)
+@router.post("", response_model=CommunitySubmitResponse, status_code=201)
 def submit_community_questions(
     body: CommunitySubmitRequest,
     user_id: str = Depends(get_current_user_id),
@@ -133,8 +144,17 @@ def submit_community_questions(
         db.flush()
         created.append(q)
 
+    # Award achievements after rows are flushed so the predicate's COUNT
+    # query sees the new submissions. community_first fires on submit
+    # regardless of status; community_star / community_legend gate on
+    # approved count.
+    new_achievements = check_and_award(uid, db, trigger="community_submit")
     db.commit()
-    return [_to_out(q, db, uid) for q in created]
+
+    return CommunitySubmitResponse(
+        questions=[_to_out(q, db, uid) for q in created],
+        new_achievements=new_achievements,
+    )
 
 
 # ─────────────────────────────────────────

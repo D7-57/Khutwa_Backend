@@ -72,6 +72,7 @@ from app.services.tts import synthesize_question_audio
 from app.services.interview_summary import build_interview_summary
 from app.services.interview.body_tracker import get_tracker, create_tracker, remove_tracker
 from app.services.interview.tone_analyzer import analyze_tone
+from app.services.achievements import check_and_award
 
 router = APIRouter(prefix="/interviews", tags=["interviews"])
 
@@ -792,12 +793,24 @@ async def turn(
 
     if s.phase in ("outro", "finished"):
         if mode == "video": remove_tracker(session_id)
+        was_already_finished = (s.phase == "finished" and s.finished_at is not None)
         s.phase = "finished"
         if not s.finished_at:
             s.finished_at = datetime.now(timezone.utc)
+        # Only fire on the first transition into finished — not every re-call
+        # to this endpoint after the session ended.
+        new_achievements = []
+        if not was_already_finished:
+            new_achievements = check_and_award(
+                s.user_id, db, trigger="interview_complete", session_id=str(s.id),
+            )
         db.commit()
-        return {"phase": "finished", "prompt_type": "outro",
-                "prompt_text": OUTRO_TEXT.get(language, OUTRO_TEXT["en"]), "transcript": transcript}
+        return {
+            "phase": "finished", "prompt_type": "outro",
+            "prompt_text": OUTRO_TEXT.get(language, OUTRO_TEXT["en"]),
+            "transcript": transcript,
+            "new_achievements": new_achievements,
+        }
 
     response = _handle_bank(s, answer, transcript, language, followup_max, db,
                         tone_desc=tone_desc, tone_data=tone_data,
@@ -1089,6 +1102,9 @@ def resume_interview(
         if not s.finished_at:
             s.finished_at = datetime.now(timezone.utc)
         _update_total_score(s, db)
+        new_achievements = check_and_award(
+            s.user_id, db, trigger="interview_complete", session_id=str(s.id),
+        )
         db.commit()
         return {
             "session_id": str(s.id),
@@ -1098,6 +1114,7 @@ def resume_interview(
             "total_questions": total,
             "answered": answered,
             "prompt_text": OUTRO_TEXT.get(language, OUTRO_TEXT["en"]),
+            "new_achievements": new_achievements,
         }
 
     if mode == "video":
@@ -1144,8 +1161,8 @@ def finalize_interview(
         remove_tracker(str(s.id))
 
     if s.phase == "finished":
-        # Already finished — return current snapshot.
-        return _finalize_response(s, db)
+        # Already finished — return current snapshot. No re-award.
+        return _finalize_response(s, db, new_achievements=[])
 
     # Mark unanswered SQs as skipped.
     sqs = (
@@ -1179,12 +1196,15 @@ def finalize_interview(
     s.followup_count = 0
     db.flush()
     _update_total_score(s, db)
+    new_achievements = check_and_award(
+        s.user_id, db, trigger="interview_complete", session_id=str(s.id),
+    )
     db.commit()
     db.refresh(s)
-    return _finalize_response(s, db)
+    return _finalize_response(s, db, new_achievements=new_achievements)
 
 
-def _finalize_response(s: InterviewSession, db: Session) -> dict:
+def _finalize_response(s: InterviewSession, db: Session, new_achievements: list | None = None) -> dict:
     answered = db.query(SessionQuestion).filter(
         SessionQuestion.session_id == s.id,
         SessionQuestion.user_answer.isnot(None),
@@ -1200,6 +1220,7 @@ def _finalize_response(s: InterviewSession, db: Session) -> dict:
         "finished_at": s.finished_at.isoformat() if s.finished_at else None,
         "num_answered": answered,
         "num_questions": total,
+        "new_achievements": new_achievements or [],
     }
 
 
@@ -1442,12 +1463,16 @@ def rapid_submit(
     s.total_score = int(sum(scores) / len(scores)) if scores else 0
     s.phase = "finished"
     s.finished_at = datetime.now(timezone.utc)
+    new_achievements = check_and_award(
+        s.user_id, db, trigger="interview_complete", session_id=str(s.id),
+    )
     db.commit()
 
     return {
         "session_id": str(s.id),
         "total_score": s.total_score,
         "results": results,
+        "new_achievements": new_achievements,
     }
 
 

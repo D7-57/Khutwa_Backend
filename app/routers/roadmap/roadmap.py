@@ -31,6 +31,7 @@ from app.services.roadmap.generator import (
     save_task_to_profile,
     classify_task_for_profile,
 )
+from app.services.achievements import check_and_award
 
 router = APIRouter(prefix="/roadmap", tags=["roadmap"])
 
@@ -232,6 +233,15 @@ def complete_roadmap_task(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    # complete_task commits internally. We start a fresh sub-transaction
+    # for the awards. roadmap_first_task fires after the first task is
+    # marked complete; roadmap_pathfinder needs a fully-completed stage.
+    new_achievements = check_and_award(uid, db, trigger="roadmap_task")
+    db.commit()
+
+    # Fold the awards into the dict result before Pydantic coerces.
+    if isinstance(result, dict):
+        result["new_achievements"] = new_achievements
     return result
 
 

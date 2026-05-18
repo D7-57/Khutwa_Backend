@@ -7,6 +7,7 @@ from app.models.career.role import Role, UserRole
 from app.models.career.skill import Skill, UserSkill
 from app.models.career.role_skill import RoleSkill
 from app.models.roadmap import RoadmapTemplate, UserRoadmap, RoadmapStage, RoadmapTask
+from app.models.achievement import Achievement, UserAchievement
 
 __all__ = [
     "Profile",
@@ -26,4 +27,6 @@ __all__ = [
     "UserRoadmap",
     "RoadmapStage",
     "RoadmapTask",
+    "Achievement",
+    "UserAchievement",
 ]

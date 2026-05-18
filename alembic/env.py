@@ -17,6 +17,8 @@ from app.models.career.role_skill import RoleSkill
 # Import ALL your models so Alembic sees their tables
 from app.models.question import Question
 from app.models.question_vote import QuestionVote, QuestionRelevanceFeedback # noqa
+from app.models.roadmap import RoadmapTemplate, UserRoadmap, RoadmapStage, RoadmapTask  # noqa
+from app.models.achievement import Achievement, UserAchievement  # noqa: F401
 
 
 config = context.config

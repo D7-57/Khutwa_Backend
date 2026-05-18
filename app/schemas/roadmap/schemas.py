@@ -51,6 +51,9 @@ class TaskComplete(BaseModel):
     overall_progress: float
     stage_completed: bool
     next_stage_unlocked: bool
+    # Optional achievement awards piggy-backed on the response. Always present
+    # in successful responses; empty list when nothing new was earned.
+    new_achievements: list[dict] = []
 
 
 # ── Stage ──
