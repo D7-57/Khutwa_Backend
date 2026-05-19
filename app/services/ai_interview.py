@@ -18,6 +18,11 @@ import re
 import random
 from openai import OpenAI
 from app.core.config import settings
+from app.services.interviewer_personalities import (
+    difficulty_hint_for_generation,
+    normalize_personality,
+    personality_note,
+)
 
 client = OpenAI(api_key=settings.OPENAI_API_KEY)
 
@@ -95,11 +100,21 @@ def pick_intro(language: str, name: str | None = None) -> str:
 #  INTRO EVALUATION
 # ─────────────────────────────────────────
 
-def evaluate_intro(answer: str, language: str) -> dict:
+def evaluate_intro(
+    answer: str,
+    language: str,
+    profile_context: dict | None = None,
+) -> dict:
+    personality = None
+    if profile_context:
+        personality = normalize_personality(
+            profile_context.get("interviewer_personality")
+        )
     system = (
         "You are a professional interview coach. Evaluate the candidate's "
         "'Tell me about yourself' answer. Be fair — acknowledge effort but "
         "don't inflate scores for weak answers. Output JSON only, no markdown."
+        + personality_note(personality)
     )
     schema = {
         "score": "0-100",
@@ -272,6 +287,10 @@ def evaluate_and_decide(
         type_guidance = "For behavioral: if answer lacks a concrete example, ask for a specific situation."
 
     extra_context = _profile_note(profile_context)
+    if profile_context:
+        extra_context += personality_note(
+            profile_context.get("interviewer_personality")
+        )
     if body_language_desc:
         extra_context += f"\n\nBODY LANGUAGE:\n{body_language_desc}"
     if tone_desc:
@@ -521,6 +540,7 @@ def classify_user_input(
     current_question: str,
     role: str,
     language: str,
+    interviewer_personality: str | None = None,
 ) -> dict:
     """
     Classify whether the user's input is an answer, a clarification request,
@@ -532,10 +552,12 @@ def classify_user_input(
         {"type": "curiosity",     "response": "..."}      — they explicitly want to learn it
     """
     lang_note = "Respond in Arabic." if language == "ar" else "Respond in English."
+    persona_block = personality_note(interviewer_personality)
 
     prompt = f"""The candidate is in an interview for the role: {role}
 They were asked: \"\"\"{current_question}\"\"\"
 They responded: \"\"\"{user_text}\"\"\"
+{persona_block}
 
 Classify their response into ONE of:
 
@@ -726,6 +748,7 @@ def generate_ai_questions(
     tech_ratio: int = 50,
     company: str | None = None,
     cv_summary: str | None = None,
+    interviewer_personality: str | None = None,
 ) -> list[dict]:
     if cv_summary:
         return generate_cv_questions(role=role, language=language, count=count,
@@ -747,7 +770,7 @@ Return ONLY a JSON array:
 Rules:
 - Technical: test real knowledge, not definitions
 - Soft/behavioral: "Tell me about a time..." or scenario format
-- Vary difficulty (mix of 2, 3, 4)
+- {difficulty_hint_for_generation(interviewer_personality)}
 - Specific to the role"""
 
     resp = client.chat.completions.create(

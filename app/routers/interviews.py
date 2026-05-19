@@ -68,6 +68,10 @@ from app.services.ai_interview import (
     pick_intro,
     OUTRO_TEXT,
 )
+from app.services.interviewer_personalities import (
+    FOLLOWUP_MAX,
+    normalize_personality,
+)
 from app.services.stt import transcribe_audio
 from app.services.tts import synthesize_question_audio
 from app.services.interview_summary import build_interview_summary
@@ -148,6 +152,9 @@ class StartInterviewRequest(BaseModel):
     language: str | None = None
     interview_language: str | None = None
     lang: str | None = None
+    # AI interviewer personality: saqr | baseer | naseem
+    interviewer_personality: str | None = None
+    personality: str | None = None  # alias
 
 
 @router.post("/start")
@@ -238,6 +245,17 @@ def start_interview(
     if practice_mode == "focused":
         profile_context["focus_mode"] = True
 
+    personality = normalize_personality(
+        body.interviewer_personality or body.personality
+    )
+    if personality:
+        profile_context["interviewer_personality"] = personality
+        # Personality drives follow-up depth unless client sent a higher value.
+        body.followup_max = max(
+            body.followup_max,
+            FOLLOWUP_MAX.get(personality, body.followup_max),
+        )
+
     # ── Build question mix ──
     weak_question_ids = _get_weak_question_ids(db, uid, body.role_name)
 
@@ -248,6 +266,7 @@ def start_interview(
         user_id=uid,
         weak_question_ids=weak_question_ids if practice_mode == "focused" else set(),
         experience_band=profile_context.get("experience_band"),
+        interviewer_personality=personality,
     )
 
     if not all_questions:
@@ -318,7 +337,7 @@ def start_interview(
             "prompt_type": "rapid",
             "prompt_text": pick_intro(language, user_name),
             "questions": all_question_data,
-            "config": _config_dict(body, len(all_questions), practice_mode),
+            "config": _config_dict(body, len(all_questions), practice_mode, personality),
             "language": language,
         }
 
@@ -327,12 +346,17 @@ def start_interview(
         "phase": "intro",
         "prompt_type": "intro",
         "prompt_text": pick_intro(language, user_name),
-        "config": _config_dict(body, len(all_questions), practice_mode),
+        "config": _config_dict(body, len(all_questions), practice_mode, personality),
         "language": language,
     }
 
 
-def _config_dict(body: StartInterviewRequest, count: int, practice_mode: str) -> dict:
+def _config_dict(
+    body: StartInterviewRequest,
+    count: int,
+    practice_mode: str,
+    interviewer_personality: str | None = None,
+) -> dict:
     return {
         "question_source": body.question_source,
         "tech_ratio": body.tech_ratio,
@@ -344,6 +368,7 @@ def _config_dict(body: StartInterviewRequest, count: int, practice_mode: str) ->
         "practice_mode": practice_mode,
         "include_general": body.include_general,
         "followup_max": body.followup_max,
+        "interviewer_personality": interviewer_personality,
     }
 
 
@@ -419,6 +444,7 @@ def _build_question_mix(
     user_id: UUID,
     weak_question_ids: set[UUID] | None = None,
     experience_band: str | None = None,
+    interviewer_personality: str | None = None,
 ) -> list[dict]:
     """
     Build the full question list for a session.
@@ -515,6 +541,7 @@ def _build_question_mix(
                 count=ai_quota_needed,
                 tech_ratio=0,  # bias toward soft/general
                 company=body.company,
+                interviewer_personality=interviewer_personality,
             )
             for q in ai_general:
                 general_qs.append(_ai_question_to_item(q))
@@ -582,6 +609,7 @@ def _build_question_mix(
             count=ai_main_total,
             tech_ratio=ai_tech_ratio,
             company=body.company,
+            interviewer_personality=interviewer_personality,
         )
         for q in raw_ai:
             ai_main.append(_ai_question_to_item(q))
@@ -1594,7 +1622,12 @@ def _get_sq_question_text(sq: SessionQuestion, db: Session, language: str = "en"
 
 
 def _handle_intro(s, answer, transcript, language, db, tone_desc="", tone_data=None, body_desc="", body_data=None):
-    intro_eval = evaluate_intro(answer=answer, language=language)
+    profile_context = (s.intro_evaluation_json or {}).get("profile_context") or {}
+    intro_eval = evaluate_intro(
+        answer=answer,
+        language=language,
+        profile_context=profile_context,
+    )
     s.intro_score = int(intro_eval.get("score", 0))
     s.intro_feedback = intro_eval.get("feedback", "")
 
@@ -1655,11 +1688,13 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
                 eval_question_text = att["follow_up_question"]
                 break
 
+    profile_context = (s.intro_evaluation_json or {}).get("profile_context") or {}
     classification = classify_user_input(
         user_text=answer,
         current_question=eval_question_text,
         role=s.role_name,
         language=language,
+        interviewer_personality=profile_context.get("interviewer_personality"),
     )
 
     # ── Clarification: explain WITHOUT giving the answer ──
