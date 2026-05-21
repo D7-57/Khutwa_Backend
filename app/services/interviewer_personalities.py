@@ -17,10 +17,88 @@ DIFFICULTY_HINT = {
 }
 
 FOLLOWUP_MAX = {
-    "saqr": 3,
+    # Per main question: how many extra drill-down rounds this personality may ask.
+    "saqr": 4,
     "baseer": 2,
     "naseem": 1,
 }
+
+# Max total follow-up *turns* in one session (across all main questions).
+SESSION_FOLLOWUP_TOTAL_CAP = {
+    "saqr": 14,
+    "baseer": 6,
+    "naseem": 2,
+}
+
+_DEFAULT_SESSION_CAP = 4
+
+
+def session_followup_total_cap(personality: str | None) -> int:
+    pid = normalize_personality(personality)
+    if not pid:
+        return _DEFAULT_SESSION_CAP
+    return SESSION_FOLLOWUP_TOTAL_CAP.get(pid, _DEFAULT_SESSION_CAP)
+
+
+def use_followup_cooldown_between_questions(personality: str | None) -> bool:
+    """When True, suppress follow-ups on Q if Q-1 already had one."""
+    return normalize_personality(personality) not in ("saqr",)
+
+
+def allows_chained_followups_per_question(personality: str | None) -> bool:
+    """Hard interviewer may ask follow-ups on prior follow-ups until budget/max score."""
+    return normalize_personality(personality) == "saqr"
+
+
+def allows_followup_for_partial_attempt(personality: str | None) -> bool:
+    """Softer 'partial' answers can still be drilled for strict personas."""
+    return normalize_personality(personality) in ("saqr", "baseer")
+
+
+def followup_decision_rules_step5(personality: str | None) -> str:
+    """
+    Injected into evaluate_and_decide() — replaces generic STEP 5 action rules.
+    """
+    pid = normalize_personality(personality)
+    if pid == "saqr":
+        return """STEP 5 — DECIDE action (ADHAM / STRICT):
+
+- admitted_ignorance → "next" (do not torture someone who plainly doesn't know).
+- off_topic → "re_ask"
+- partial → prefer "follow_up": ask one sharp probe that checks real understanding,
+  unless the answer already shows substantive partial knowledge at score ≥ 58 — then "next" is acceptable.
+- answered + score < 82 → "follow_up". Push depth: trade-offs, failure modes,
+  scalability, correctness edge cases, or "explain briefly how this works under the hood."
+  Prefer one focused question over generic "tell me more".
+- answered + score ≥ 82 → "next" only if the answer is specific enough that a senior would accept it at a top firm;
+  if it is fluent but shallow or hand-wavy, still use "follow_up" once.
+
+When you choose "follow_up", stress-test UNDERSTANDING (not rapport). Be direct and professional."""
+    if pid == "naseem":
+        return """STEP 5 — DECIDE action (YAZAN / SUPPORTIVE):
+
+- admitted_ignorance → "next"
+- off_topic → "re_ask"
+- partial + score < 60 → "follow_up" with one gentle, encouraging probe
+- partial + score >= 60 → "next"
+- answered + score < 50 → "follow_up" with a hint-style question
+- answered + score 50-68 → optionally one "follow_up" for a concrete example; if the answer already includes a clear example, "next"
+- answered + score > 68 → "next"
+
+Keep follow-up tone warm; do not intimidate."""
+
+    # baseer + default
+    return """STEP 5 — DECIDE action:
+
+- admitted_ignorance → "next"
+- off_topic → "re_ask"
+- partial + score < 65 → "follow_up" (ask a probing question that nudges them to be more complete)
+- partial + score >= 65 → "next"
+- answered + score < 45 → "follow_up" (weak — clarify what fell short)
+- answered + score 45-70 → "follow_up" (often ask for a concrete example)
+- answered + score > 70 → "next"
+
+When you decide "follow_up", stay coaching-oriented: constructive, not harsh."""
 
 SYSTEM_PROMPTS = {
     "saqr": """You are أدهم (Adham), a ruthless senior hiring manager with 20+ years of experience at top-tier companies in Saudi Arabia and the Gulf region.

@@ -20,6 +20,7 @@ from openai import OpenAI
 from app.core.config import settings
 from app.services.interviewer_personalities import (
     difficulty_hint_for_generation,
+    followup_decision_rules_step5,
     normalize_personality,
     personality_note,
 )
@@ -287,10 +288,12 @@ def evaluate_and_decide(
         type_guidance = "For behavioral: if answer lacks a concrete example, ask for a specific situation."
 
     extra_context = _profile_note(profile_context)
+    personality_raw = (
+        profile_context.get("interviewer_personality") if profile_context else None
+    )
+    followup_step5 = followup_decision_rules_step5(personality_raw)
     if profile_context:
-        extra_context += personality_note(
-            profile_context.get("interviewer_personality")
-        )
+        extra_context += personality_note(personality_raw)
     if body_language_desc:
         extra_context += f"\n\nBODY LANGUAGE:\n{body_language_desc}"
     if tone_desc:
@@ -341,14 +344,7 @@ Example tip: "Mention a measurable outcome like the % latency reduction you achi
 STEP 4 — ALWAYS write a strong correct_answer (2-4 sentences) so the user has study material,
 even if they answered well. This is the gold standard the candidate can compare against.
 
-STEP 5 — DECIDE action:
-- admitted_ignorance → "next" (don't drill into what they don't know)
-- off_topic → "re_ask"
-- partial + score < 65 → "follow_up" (ask a probing question that nudges them to be more complete)
-- partial + score >= 65 → "next" (they got close enough, move on)
-- answered + score < 45 → "follow_up" (the answer was weak — ask them to clarify the part that fell short)
-- answered + score 45-70 → "follow_up" (ask for a concrete example: "Can you walk me through a specific time you did this?")
-- answered + score > 70 → "next" (strong enough, don't slow the pace)
+{followup_step5}
 
 When you decide "follow_up", `follow_up_question` MUST be:
 - specific to THIS question and THIS answer (not a generic "tell me more")

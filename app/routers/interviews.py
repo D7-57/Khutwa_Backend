@@ -70,7 +70,11 @@ from app.services.ai_interview import (
 )
 from app.services.interviewer_personalities import (
     FOLLOWUP_MAX,
+    allows_chained_followups_per_question,
+    allows_followup_for_partial_attempt,
     normalize_personality,
+    session_followup_total_cap,
+    use_followup_cooldown_between_questions,
 )
 from app.services.stt import transcribe_audio
 from app.services.tts import synthesize_question_audio
@@ -1809,98 +1813,125 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
     answer_type = result.get("answer_type", "answered")
     score = int(result.get("score", 0) or 0)
 
+    personality_key = normalize_personality(
+        (profile_context or {}).get("interviewer_personality")
+    )
+
     # ─────────────────────────────────────────────────────
-    # v3.3: Follow-up policy
+    # Follow-up policy (personality-aware)
     # ─────────────────────────────────────────────────────
-    # The LLM proposes follow-ups based on score; we apply structural rules
-    # the LLM can't see (session budget, cooldown, question category, prior
-    # follow-up state). Final word lives here, not in the model.
+    # The LLM proposes follow-ups; structural gates enforce personality.
     #
-    # Rules:
-    #   1. Never follow-up on a general / icebreaker question.
-    #   2. Never follow-up on an answer that wasn't a real attempt
-    #      (admitted_ignorance, off_topic, partial). Re-asking someone who
-    #      already said "I don't know" feels bad.
-    #   3. Session budget: at most 2 follow-ups across the whole interview.
-    #   4. Cooldown: if the previous question got a follow-up, don't ask one
-    #      on this question. Prevents three follow-ups in a row feeling like
-    #      an interrogation.
-    #   5. We're already inside a follow-up (is_followup_answer=True) — no
-    #      nested follow-ups.
-    #
-    # If those gates pass and the LLM said "next" but score is in the
-    # follow-up band (40-65, answered), we OVERRIDE to follow_up and
-    # synthesize a question.
+    #   • GENERAL questions: never follow up.
+    #   • ADMITTED_IGNORANCE / OFF_TOPIC: never follow up.
+    #   • PARTIAL: only saqr/baseer — others move on unless model already said next.
+    #   • SESSION CAP: weighted by interviewer (hard mode allows many more).
+    #   • COOLDOWN between main questions for medium/easy (not strict).
+    #   • CHAINED drills: only HARD (saqr) may issue follow-ups to prior follow-ups
+    #     until per-question followup_max is exhausted.
 
     def _followups_allowed() -> bool:
-        # Don't pile follow-up on an already-follow-up turn.
+        pid = personality_key
+
         if is_followup_answer:
-            return False
-        # No follow-ups on general / icebreaker questions.
+            if not allows_chained_followups_per_question(pid):
+                return False
+            if s.followup_count >= followup_max:
+                return False
+
         if (q_type or "").strip().lower() == "general":
             return False
-        # No follow-ups on weak attempt classes — they already said they
-        # don't know or went off-topic; the kind thing is to move on.
-        if answer_type in ("admitted_ignorance", "off_topic", "partial"):
+        if answer_type == "admitted_ignorance":
             return False
-        # Session budget: cap at 2 follow-ups total across the interview.
+        if answer_type == "off_topic":
+            return False
+        if answer_type == "partial" and not allows_followup_for_partial_attempt(pid):
+            return False
+
+        cap = session_followup_total_cap(pid)
+        prior_sq_list = db.query(SessionQuestion).filter(
+            SessionQuestion.session_id == s.id,
+            SessionQuestion.id != sq.id,
+        ).all()
         prior_followups = sum(
             1
-            for prior_sq in (
-        db.query(SessionQuestion)
-                .filter(SessionQuestion.session_id == s.id, SessionQuestion.id != sq.id)
-        .all()
-    )
+            for prior_sq in prior_sq_list
             for att in (prior_sq.evaluation_json or {}).get("attempts", [])
             if att.get("action") == "follow_up"
         )
-        if prior_followups >= 2:
+        if prior_followups >= cap:
             return False
-        # Cooldown: skip if previous question already got one.
-        prev_idx = s.current_index - 1
-        if prev_idx >= 0:
-            prev_sq = (
-                db.query(SessionQuestion)
-                .filter(SessionQuestion.session_id == s.id)
-        .order_by(SessionQuestion.id)
-                .offset(prev_idx)
-                .limit(1)
-        .first()
-    )
-            if prev_sq:
-                prev_attempts = (prev_sq.evaluation_json or {}).get("attempts", [])
-                if any(att.get("action") == "follow_up" for att in prev_attempts):
-                    return False
+
+        if (
+            use_followup_cooldown_between_questions(pid)
+            and not is_followup_answer
+        ):
+            prev_idx = s.current_index - 1
+            if prev_idx >= 0:
+                prev_sq = (
+                    db.query(SessionQuestion)
+                    .filter(SessionQuestion.session_id == s.id)
+                    .order_by(SessionQuestion.id)
+                    .offset(prev_idx)
+                    .limit(1)
+                    .first()
+                )
+                if prev_sq:
+                    prev_attempts = (prev_sq.evaluation_json or {}).get("attempts", [])
+                    if any(att.get("action") == "follow_up" for att in prev_attempts):
+                        return False
         return True
 
-    in_followup_band = (
-        answer_type == "answered" and 40 <= score <= 65
-    )
+    def _in_followup_band() -> bool:
+        if answer_type != "answered":
+            return False
+        if personality_key == "saqr":
+            return score < 80
+        if personality_key == "naseem":
+            return 40 <= score <= 58
+        if personality_key == "baseer":
+            return 40 <= score <= 62
+        return 40 <= score <= 65
 
     if action == "follow_up" and not _followups_allowed():
-        # LLM wanted to follow up but our policy says no. Drop to next.
         action = "next"
         followup_q = ""
-    elif action != "follow_up" and in_followup_band and _followups_allowed():
-        # LLM said "next" but our rules say this answer deserves a follow-up.
-        # Override and synthesize a question if the LLM didn't supply one.
+    elif (
+        action != "follow_up"
+        and _in_followup_band()
+        and _followups_allowed()
+    ):
         action = "follow_up"
         if not followup_q:
             followup_q = (
-                "Can you walk me through a specific time you applied this?"
-                if language != "ar"
-                else "هل يمكنك أن تشاركني موقفاً محدداً طبّقت فيه هذه الفكرة؟"
+                (
+                    "Push deeper: what's the weakest part of your design trade-off, "
+                    "and why did you choose it anyway?"
+                )
+                if personality_key == "saqr" and language != "ar"
+                else (
+                    "ادْفع للتفصيل: ما أكثر جزء هش في قرار التصميم الذي ذكرته، ولماذا قبلت هذا المسار؟"
+                )
+                if personality_key == "saqr"
+                else (
+                    "Can you walk me through a specific time you applied this?"
+                    if language != "ar"
+                    else "هل يمكنك أن تشاركني موقفاً محدداً طبّقت فيه هذه الفكرة؟"
+                )
             )
 
-    if not sq.evaluation_json: sq.evaluation_json = {"attempts": []}
+    if not sq.evaluation_json:
+        sq.evaluation_json = {"attempts": []}
     attempt = {"answer": answer, "evaluation": evaluation, "action": action}
     if is_followup_answer:
         attempt["is_followup"] = True
         attempt["followup_question"] = eval_question_text
     if followup_q and action == "follow_up":
         attempt["follow_up_question"] = followup_q
-    if tone_data: attempt["tone"] = tone_data
-    if body_data: attempt["body_language"] = body_data
+    if tone_data:
+        attempt["tone"] = tone_data
+    if body_data:
+        attempt["body_language"] = body_data
     sq.evaluation_json = {
         **sq.evaluation_json,
         "attempts": sq.evaluation_json.get("attempts", []) + [attempt],
@@ -1948,7 +1979,37 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
                 "question_type": q_type, "evaluation": evaluation,
                 "transcript": transcript, "reask_count": reask_count, "reask_max": MAX_REASK}
 
-    if answer_type in ("admitted_ignorance", "partial"):
+    def _should_issue_follow_up_round() -> bool:
+        return (
+            action in ("follow_up", "clarify")
+            and followup_q
+            and s.followup_count < followup_max
+            and answer_type not in ("off_topic", "admitted_ignorance")
+            and (
+                answer_type == "answered"
+                or (
+                    answer_type == "partial"
+                    and allows_followup_for_partial_attempt(personality_key)
+                )
+            )
+            and _followups_allowed()
+        )
+
+    if _should_issue_follow_up_round():
+        s.followup_count += 1
+        if sq.score is None:
+            sq.score = int(evaluation.get("score", 0))
+            sq.ai_feedback = evaluation.get("final_feedback", "")
+        db.flush()
+        db.commit()
+        return {"phase": "bank", "action": "follow_up", "prompt_type": "follow_up",
+                "prompt_text": followup_q,
+                "question_id": str(sq.question_id) if sq.question_id else None,
+                "question_type": q_type, "evaluation": evaluation,
+                "transcript": transcript, "followup_count": s.followup_count,
+                "followup_max": followup_max}
+
+    if answer_type == "admitted_ignorance":
         s.followup_count = 0
         sq.user_answer = sq.user_answer or _answer_to_store(s, answer)
         sq.score = int(evaluation.get("score", 25))
@@ -1975,26 +2036,45 @@ def _handle_bank(s, answer, transcript, language, followup_max, db,
                 "evaluation": evaluation, "correct_answer": correct,
                 "transcript": transcript, "total_score": s.total_score}
 
-    if action in ("follow_up", "clarify") and s.followup_count < followup_max and followup_q:
-        s.followup_count += 1
-        if sq.score is None:
-            sq.score = int(evaluation.get("score", 0))
-            sq.ai_feedback = evaluation.get("final_feedback", "")
+    if answer_type == "partial":
+        s.followup_count = 0
+        sq.user_answer = sq.user_answer or _answer_to_store(s, answer)
+        sq.score = int(evaluation.get("score", 25))
+        sq.ai_feedback = evaluation.get("final_feedback", "")
+        correct = evaluation.get("correct_answer", "")
         db.flush()
+        _update_total_score(s, db)
+        next_sq = _advance_pointer(s, db)
+        if not next_sq:
+            s.phase = "outro"
+            s.finished_at = datetime.now(timezone.utc)
+            new_ach = _award_interview_complete(s, db)
+            db.commit()
+            return {"phase": "outro", "action": "end", "prompt_type": "outro",
+                    "prompt_text": OUTRO_TEXT.get(language, OUTRO_TEXT["en"]),
+                    "evaluation": evaluation, "correct_answer": correct,
+                    "transcript": transcript, "total_score": s.total_score,
+                    "new_achievements": new_ach}
+        nq_text = _get_sq_question_text(next_sq, db, language)
         db.commit()
-        return {"phase": "bank", "action": "follow_up", "prompt_type": "follow_up",
-                "prompt_text": followup_q,
-                "question_id": str(sq.question_id) if sq.question_id else None,
-                "question_type": q_type, "evaluation": evaluation,
-                "transcript": transcript, "followup_count": s.followup_count,
-                "followup_max": followup_max}
+        return {"phase": "bank", "action": "next", "prompt_type": "bank_question",
+                "question_id": str(next_sq.question_id) if next_sq.question_id else None,
+                "question_type": next_sq.question_type, "prompt_text": nq_text,
+                "evaluation": evaluation, "correct_answer": correct,
+                "transcript": transcript, "total_score": s.total_score}
 
     s.followup_count = 0
     if sq.user_answer is None:
         sq.user_answer = _answer_to_store(s, answer)
     new_score = int(evaluation.get("score", 0))
     if sq.score is not None and is_followup_answer:
-        sq.score = max(sq.score, (sq.score + new_score) // 2)
+        # Weight the latest attempt heavily so strong follow-ups can recover from
+        # a weak anchor answer (plain average made scores look inconsistent).
+        blended = (sq.score * 3 + new_score * 7 + 5) // 10
+        if new_score >= sq.score:
+            sq.score = max(blended, new_score)
+        else:
+            sq.score = sq.score
     else:
         sq.score = new_score
     sq.ai_feedback = evaluation.get("final_feedback", "")

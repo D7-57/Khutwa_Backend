@@ -96,7 +96,16 @@ def build_interview_summary(
         if not first_attempt:
             first_attempt = last_attempt
 
-        eval_data = first_attempt.get("evaluation", {})
+        # Narrative feedback should reflect how the candidate left this slot —
+        # usually the latest graded attempt — not only the weak first swing.
+        eval_data = {}
+        for att in reversed(all_attempts):
+            ev = att.get("evaluation")
+            if isinstance(ev, dict) and ev:
+                eval_data = ev
+                break
+        if not eval_data:
+            eval_data = first_attempt.get("evaluation", {}) if first_attempt else {}
         is_skipped = bool(
             (sq.evaluation_json or {}).get("skipped")
             or first_attempt.get("skipped")
